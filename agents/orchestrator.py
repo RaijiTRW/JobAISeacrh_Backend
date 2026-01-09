@@ -177,7 +177,7 @@ class Orchestrator:
                     )
                     print(f"Validated: {len(validated)} vacancies")
 
-                    vacancies = [v.model_dump() for v in validated]
+                    vacancies = [v.model_dump(mode='json') for v in validated]
 
                     text_parts.append(
                         f"\n\nНашёл {len(validated)} подходящих вакансий из {result.total_found} найденных."
