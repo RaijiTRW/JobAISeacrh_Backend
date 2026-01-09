@@ -16,35 +16,12 @@ class SuperJobParser(BaseParser):
     name = "superjob"
     base_url = "https://www.superjob.ru"
 
-    # Маппинг городов
-    CITY_SLUGS = {
-        "москва": "moskva",
-        "санкт-петербург": "sankt-peterburg",
-        "спб": "sankt-peterburg",
-        "питер": "sankt-peterburg",
-        "новосибирск": "novosibirsk",
-        "екатеринбург": "ekaterinburg",
-        "казань": "kazan",
-        "нижний новгород": "nizhnij-novgorod",
-        "краснодар": "krasnodar",
-        "ростов-на-дону": "rostov-na-donu",
-        "воронеж": "voronezh",
-        "пермь": "perm",
-        "самара": "samara",
-        "уфа": "ufa",
-        "челябинск": "chelyabinsk",
-        "омск": "omsk",
-        "красноярск": "krasnoyarsk",
-        "волгоград": "volgograd",
-        "тюмень": "tyumen",
-    }
-
     async def search(self, filters: SearchFilters, limit: int = 20) -> list[Vacancy]:
         """Поиск вакансий на SuperJob"""
         vacancies = []
 
         try:
-            city_slug = self._get_city_slug(filters.city) if filters.city else ""
+            city_slug = self._get_city_slug(filters.city)
             url = f"{self.base_url}/vakansii"
             if city_slug:
                 url = f"{self.base_url}/vakansii/{city_slug}"
@@ -151,18 +128,15 @@ class SuperJobParser(BaseParser):
         return vacancies
 
     def _get_city_slug(self, city: str) -> str:
-        """Получить slug города для URL"""
+        """Получить slug города для URL (автоматическая транслитерация)"""
         if not city:
             return ""
         city_lower = city.lower().strip()
         # Если передали "россия" — это вся страна (без slug)
-        if city_lower in ("россия", "russia", "рф", "rf"):
+        if city_lower in ("россия", "russia", "рф", "rf", "rossiya"):
             return ""
-        slug = self.CITY_SLUGS.get(city_lower)
-        if slug:
-            return slug
-        # Если город не в словаре — ищем по всей России
-        return ""
+        # Автоматическая транслитерация (SuperJob использует '-' как разделитель)
+        return self.transliterate_city(city, separator="-")
 
     def _parse_vacancy(self, item, city: str) -> Optional[Vacancy]:
         """Парсинг вакансии из HTML"""

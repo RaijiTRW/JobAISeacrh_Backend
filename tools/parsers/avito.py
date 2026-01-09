@@ -18,35 +18,12 @@ class AvitoParser(BaseParser):
     name = "avito"
     base_url = "https://www.avito.ru"
 
-    # Маппинг городов на slug
-    CITY_SLUGS = {
-        "москва": "moskva",
-        "санкт-петербург": "sankt-peterburg",
-        "спб": "sankt-peterburg",
-        "питер": "sankt-peterburg",
-        "новосибирск": "novosibirsk",
-        "екатеринбург": "ekaterinburg",
-        "казань": "kazan",
-        "нижний новгород": "nizhniy_novgorod",
-        "краснодар": "krasnodar",
-        "ростов-на-дону": "rostov-na-donu",
-        "воронеж": "voronezh",
-        "пермь": "perm",
-        "самара": "samara",
-        "уфа": "ufa",
-        "челябинск": "chelyabinsk",
-        "омск": "omsk",
-        "красноярск": "krasnoyarsk",
-        "волгоград": "volgograd",
-        "тюмень": "tyumen",
-    }
-
     async def search(self, filters: SearchFilters, limit: int = 20) -> list[Vacancy]:
         """Поиск вакансий на Avito"""
         vacancies = []
 
         try:
-            city_slug = self._get_city_slug(filters.city) if filters.city else "russia"
+            city_slug = self._get_city_slug(filters.city)
             url = f"{self.base_url}/{city_slug}/vakansii"
 
             params = {}
@@ -135,18 +112,15 @@ class AvitoParser(BaseParser):
         return vacancies
 
     def _get_city_slug(self, city: str) -> str:
-        """Получить slug города для URL"""
+        """Получить slug города для URL (автоматическая транслитерация)"""
         if not city:
-            return "russia"
+            return "rossiya"
         city_lower = city.lower().strip()
         # Если передали "россия" — это вся страна
-        if city_lower in ("россия", "russia", "рф", "rf"):
-            return "russia"
-        slug = self.CITY_SLUGS.get(city_lower)
-        if slug:
-            return slug
-        # Если город не в словаре — используем всю Россию
-        return "russia"
+        if city_lower in ("россия", "russia", "рф", "rf", "rossiya"):
+            return "rossiya"
+        # Автоматическая транслитерация (Avito использует '_' как разделитель)
+        return self.transliterate_city(city, separator="_")
 
     def _parse_vacancy(self, item, city: str) -> Optional[Vacancy]:
         """Парсинг вакансии из HTML"""
