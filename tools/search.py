@@ -55,9 +55,9 @@ class VacancySearchTool:
         print(f"[Search] Running {len(parallel_tasks)} parallel tasks (HH + SuperJob)")
         parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
 
-        # Avito - до 2 queries ПОСЛЕДОВАТЕЛЬНО (с паузами между запросами)
-        # Уменьшено до 2 чтобы снизить шанс rate limit
-        avito_queries = queries[:2]  # Максимум 2 запроса
+        # Avito - до 3 queries ПОСЛЕДОВАТЕЛЬНО (с паузами между запросами)
+        # С прокси можно делать больше запросов
+        avito_queries = queries[:3]  # Максимум 3 запроса
         avito_results = []
         print(f"[Search] Running {len(avito_queries)} Avito queries sequentially")
         for query in avito_queries:

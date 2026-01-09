@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import quote
 from tools.parsers import BaseParser
 from models.vacancy import Vacancy, SearchFilters
+from config import get_settings
 
 
 class AvitoParser(BaseParser):
@@ -21,6 +22,27 @@ class AvitoParser(BaseParser):
     base_url = "https://www.avito.ru"
     _last_request_time = 0  # Для rate limiting
     _request_count = 0  # Счётчик запросов для ротации
+    _proxy_list: list[str] = []  # Список прокси для ротации
+    _proxy_index = 0  # Текущий индекс прокси
+
+    @classmethod
+    def _get_proxy(cls) -> Optional[str]:
+        """Получить следующий прокси из списка (ротация)"""
+        settings = get_settings()
+        if not settings.proxy_urls:
+            return None
+
+        # Инициализируем список прокси при первом вызове
+        if not cls._proxy_list:
+            cls._proxy_list = [p.strip() for p in settings.proxy_urls.split(",") if p.strip()]
+
+        if not cls._proxy_list:
+            return None
+
+        # Ротация прокси
+        proxy = cls._proxy_list[cls._proxy_index % len(cls._proxy_list)]
+        cls._proxy_index += 1
+        return proxy
 
     # Пул User-Agent'ов для ротации
     USER_AGENTS = [
@@ -52,10 +74,14 @@ class AvitoParser(BaseParser):
             current_time = time.time()
             time_since_last = current_time - AvitoParser._last_request_time
 
-            # Увеличенные задержки: 3-6 секунд между запросами
-            min_delay = 3.0
+            # Если есть прокси - минимальные задержки, иначе - длинные
+            settings = get_settings()
+            has_proxy = bool(settings.proxy_urls)
+            min_delay = 1.0 if has_proxy else 3.0
+            random_extra = random.uniform(0.5, 1.5) if has_proxy else random.uniform(1.0, 3.0)
+
             if time_since_last < min_delay:
-                wait_time = min_delay - time_since_last + random.uniform(1.0, 3.0)
+                wait_time = min_delay - time_since_last + random_extra
                 print(f"[Avito] Rate limit: waiting {wait_time:.1f}s")
                 await asyncio.sleep(wait_time)
 
@@ -102,7 +128,12 @@ class AvitoParser(BaseParser):
 
             print(f"[Avito] Searching: {url} with params: {params}")
 
-            async with httpx.AsyncClient() as client:
+            # Получаем прокси (если настроены)
+            proxy = self._get_proxy()
+            if proxy:
+                print(f"[Avito] Using proxy: {proxy[:20]}...")  # Показываем только начало для безопасности
+
+            async with httpx.AsyncClient(proxy=proxy) as client:
                 response = await client.get(
                     url,
                     params=params,

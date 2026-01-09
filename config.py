@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     max_vacancies_per_source: int = 20
     max_total_vacancies: int = 50
 
+    # Proxy settings (для обхода rate limiting на Avito)
+    # Формат: http://user:pass@host:port или http://host:port
+    # Можно указать несколько через запятую для ротации
+    proxy_urls: str = ""  # Пустая строка = прокси отключены
+
     class Config:
         env_file = ".env"
 
