@@ -17,6 +17,7 @@ class VacancySearchTool:
 
     # Расширение коротких/неоднозначных запросов (НА РУССКОМ для российских сайтов)
     QUERY_EXPANSIONS = {
+        # IT
         "ии": "машинное обучение OR data scientist OR нейросети OR искусственный интеллект",
         "ai": "машинное обучение OR data scientist OR нейросети",
         "ml": "машинное обучение OR data scientist OR аналитик данных",
@@ -39,6 +40,16 @@ class VacancySearchTool:
         "ui": "UI дизайнер OR UI/UX дизайнер OR веб-дизайнер",
         "pm": "менеджер продукта OR менеджер проекта OR продакт-менеджер",
         "продакт": "менеджер продукта OR продакт-менеджер OR product owner",
+        # Маркетплейсы и ПВЗ
+        "пвз": "пункт выдачи OR Wildberries OR Ozon OR СДЭК OR оператор пвз",
+        "wildberries": "Wildberries OR пункт выдачи Wildberries OR WB",
+        "вайлдберриз": "Wildberries OR пункт выдачи Wildberries OR WB",
+        "вб": "Wildberries OR пункт выдачи Wildberries",
+        "озон": "Ozon OR пункт выдачи Ozon OR склад Ozon",
+        "ozon": "Ozon OR пункт выдачи Ozon OR склад Ozon",
+        "сдэк": "СДЭК OR пункт выдачи СДЭК OR курьер СДЭК",
+        "cdek": "СДЭК OR пункт выдачи СДЭК",
+        "маркетплейс": "Wildberries OR Ozon OR маркетплейс OR пункт выдачи",
     }
 
     def __init__(self):
@@ -123,16 +134,16 @@ class VacancySearchTool:
             "name": "search_vacancies",
             "description": """Поиск вакансий на hh.ru, Avito и SuperJob.
 
-ВАЖНО: Запросы НА РУССКОМ! Мы ищем на российских сайтах.
-Названия языков (Python, Java, React) можно оставлять как есть.
+ВАЖНО: Запросы НА РУССКОМ! Названия брендов (Wildberries, Ozon, Python) можно как есть.
 
 Примеры query:
 - "ИИ/AI" → "машинное обучение OR data scientist OR нейросети"
 - "фронтенд" → "фронтенд разработчик OR React OR Vue"
-- "бэкенд" → "бэкенд разработчик OR Python разработчик"
 - "питон" → "Python разработчик OR Django"
-- "джава" → "Java разработчик OR Spring"
+- "пвз" → "пункт выдачи OR Wildberries OR Ozon OR оператор пвз"
+- "вайлдберриз" → "Wildberries OR пункт выдачи Wildberries"
 - Используй OR для вариантов
+- НЕ добавляй лишние профессии (бариста, сборщик) если не просили!
 """,
             "input_schema": {
                 "type": "object",
