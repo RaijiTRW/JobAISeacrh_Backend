@@ -75,7 +75,7 @@ class SuperJobParser(BaseParser):
                 )
 
                 if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, "lxml")
+                    soup = BeautifulSoup(response.text, "html.parser")
 
                     # SuperJob использует разные классы, ищем по структуре
                     items = soup.select("[class*='f-test-vacancy-item']")[:limit]

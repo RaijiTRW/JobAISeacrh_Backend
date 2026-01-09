@@ -64,7 +64,7 @@ class AvitoParser(BaseParser):
                 )
 
                 if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, "lxml")
+                    soup = BeautifulSoup(response.text, "html.parser")
                     items = soup.select("[data-marker='item']")[:limit]
 
                     for item in items:
