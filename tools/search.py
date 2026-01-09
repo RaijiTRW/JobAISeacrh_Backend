@@ -15,28 +15,30 @@ from config import get_settings
 class VacancySearchTool:
     """Единый инструмент поиска вакансий"""
 
-    # Расширение коротких/неоднозначных запросов
+    # Расширение коротких/неоднозначных запросов (НА РУССКОМ для российских сайтов)
     QUERY_EXPANSIONS = {
-        "ии": "искусственный интеллект OR Machine Learning OR Data Science OR нейросети",
-        "ai": "искусственный интеллект OR Machine Learning OR Data Science OR AI engineer",
-        "ml": "Machine Learning OR Data Science OR ML engineer OR аналитик данных",
-        "машинное обучение": "Machine Learning OR Data Science OR ML engineer",
-        "data science": "Data Science OR аналитик данных OR Data Analyst OR Machine Learning",
-        "фронтенд": "Frontend OR React OR Vue OR Angular OR фронтенд разработчик",
-        "frontend": "Frontend OR React OR Vue OR Angular OR фронтенд разработчик",
-        "бэкенд": "Backend OR Python OR Java OR Node.js OR бэкенд разработчик",
-        "backend": "Backend OR Python OR Java OR Node.js OR бэкенд разработчик",
-        "smm": "SMM OR Social Media OR контент-менеджер OR маркетолог",
-        "seo": "SEO OR поисковая оптимизация OR SEO специалист",
-        "devops": "DevOps OR SRE OR системный администратор OR Kubernetes OR Docker",
-        "qa": "QA OR тестировщик OR Quality Assurance OR тестирование",
-        "тестировщик": "QA OR тестировщик OR Quality Assurance OR автоматизация тестирования",
-        "аналитик": "аналитик OR бизнес-аналитик OR Data Analyst OR системный аналитик",
-        "дизайнер": "дизайнер OR UI/UX OR графический дизайнер OR веб-дизайнер",
-        "ux": "UX OR UI/UX OR UX дизайнер OR Product Designer",
-        "ui": "UI OR UI/UX OR UI дизайнер OR веб-дизайнер",
-        "pm": "Product Manager OR Project Manager OR менеджер продукта OR руководитель проекта",
-        "продакт": "Product Manager OR менеджер продукта OR Product Owner",
+        "ии": "машинное обучение OR data scientist OR нейросети OR искусственный интеллект",
+        "ai": "машинное обучение OR data scientist OR нейросети",
+        "ml": "машинное обучение OR data scientist OR аналитик данных",
+        "машинное обучение": "машинное обучение OR data scientist OR ML разработчик",
+        "data science": "аналитик данных OR data scientist OR машинное обучение",
+        "фронтенд": "фронтенд разработчик OR React OR Vue OR Angular",
+        "frontend": "фронтенд разработчик OR React OR Vue OR Angular",
+        "фронт": "фронтенд разработчик OR React OR Vue",
+        "бэкенд": "бэкенд разработчик OR Python разработчик OR Java разработчик",
+        "backend": "бэкенд разработчик OR Python разработчик OR серверная разработка",
+        "бэк": "бэкенд разработчик OR Python разработчик",
+        "smm": "SMM менеджер OR контент-менеджер OR маркетолог",
+        "seo": "SEO специалист OR поисковая оптимизация",
+        "devops": "DevOps инженер OR системный администратор OR SRE",
+        "qa": "тестировщик OR QA инженер OR тестирование",
+        "тестировщик": "тестировщик OR QA инженер OR автоматизация тестирования",
+        "аналитик": "аналитик OR бизнес-аналитик OR аналитик данных OR системный аналитик",
+        "дизайнер": "дизайнер OR UI/UX дизайнер OR графический дизайнер OR веб-дизайнер",
+        "ux": "UX дизайнер OR UI/UX дизайнер OR продуктовый дизайнер",
+        "ui": "UI дизайнер OR UI/UX дизайнер OR веб-дизайнер",
+        "pm": "менеджер продукта OR менеджер проекта OR продакт-менеджер",
+        "продакт": "менеджер продукта OR продакт-менеджер OR product owner",
     }
 
     def __init__(self):
@@ -121,21 +123,23 @@ class VacancySearchTool:
             "name": "search_vacancies",
             "description": """Поиск вакансий на hh.ru, Avito и SuperJob.
 
-ФОРМИРОВАНИЕ query — используй технические термины как есть (на английском):
-- "ИИ/AI" → "Machine Learning OR Data Science OR ML engineer"
-- "фронтенд" → "Frontend OR React OR Vue"
-- "бэкенд" → "Backend OR Python OR Node.js"
-- "питон" → "Python OR Django OR FastAPI"
-- "джава" → "Java OR Spring OR Java developer"
-- Используй OR для вариантов — увеличивает охват
-- НЕ используй общие слова ("работа", "вакансия", "IT", "разработчик" без языка)
+ВАЖНО: Запросы НА РУССКОМ! Мы ищем на российских сайтах.
+Названия языков (Python, Java, React) можно оставлять как есть.
+
+Примеры query:
+- "ИИ/AI" → "машинное обучение OR data scientist OR нейросети"
+- "фронтенд" → "фронтенд разработчик OR React OR Vue"
+- "бэкенд" → "бэкенд разработчик OR Python разработчик"
+- "питон" → "Python разработчик OR Django"
+- "джава" → "Java разработчик OR Spring"
+- Используй OR для вариантов
 """,
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Поисковый запрос. Технические термины на английском. Используй OR. Примеры: 'Python OR Django OR FastAPI', 'Machine Learning OR Data Science', 'Frontend OR React OR Vue', 'Java OR Spring'."
+                        "description": "Поисковый запрос НА РУССКОМ. Названия языков можно оставлять (Python, React). Примеры: 'Python разработчик OR Django', 'машинное обучение OR data scientist', 'фронтенд разработчик OR React'."
                     },
                     "city": {
                         "type": "string",
