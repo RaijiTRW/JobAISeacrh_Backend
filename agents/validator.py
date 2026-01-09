@@ -10,12 +10,17 @@ from models.chat import UserPreferences
 class VacancyValidator:
     """Валидатор с позитивной фильтрацией"""
 
-    # Ключевые слова для каждой категории - вакансия ДОЛЖНА содержать хотя бы одно
-    MUST_CONTAIN = {
-        "пвз": ["пвз", "пункт выдачи", "wildberries", "wb", "вайлдберриз", "ozon", "озон", "яндекс маркет", "яндекс.маркет"],
-        "бариста": ["бариста", "barista", "кофейня", "кофе"],
-        "кассир": ["кассир", "касса"],
-        "продавец": ["продавец", "продажа", "консультант", "магазин"],
+    # Ключевые слова для каждой категории - вакансия ДОЛЖНА содержать хотя бы одно В НАЗВАНИИ
+    MUST_CONTAIN_TITLE = {
+        "пвз": [
+            "пвз", "пункт выдачи", "пункта выдачи", "пунктом выдачи",  # падежи
+            "выдача заказов", "выдачи заказов", "выдачу заказов", "выдачей заказов Ozon", "Сотрудник пункта выдачи (пвз) озон",
+            "Менеджер пункта заказов", "Сотрудник пункта выдачи заказов", "Сотрудник пункта выдачи wildberries", "Сотрудник пвз",
+            "Ozon (Озон) специалист в пвз", "Wildberries (Вайлдберриз) специалист в пвз", "OZON", "WILDBERRIES",
+        ],
+        "бариста": ["бариста", "barista"],
+        "кассир": ["кассир"],
+        "продавец": ["продавец"],
     }
 
     # Стоп-слова в названии - всегда исключаем
@@ -49,8 +54,8 @@ class VacancyValidator:
         category = self._detect_category(queries_text)
         print(f"[Validator] Category: {category}")
 
-        # Получаем обязательные ключевые слова для категории
-        must_contain = self.MUST_CONTAIN.get(category, [])
+        # Получаем обязательные ключевые слова для категории (проверяем в НАЗВАНИИ)
+        must_contain = self.MUST_CONTAIN_TITLE.get(category, [])
 
         # Пользовательские исключения
         user_exclusions = [w.lower().strip() for w in preferences.exclude_keywords if w]
@@ -71,11 +76,11 @@ class VacancyValidator:
             if has_stop:
                 continue
 
-            # 2. Если есть категория - вакансия ДОЛЖНА содержать ключевое слово
+            # 2. Если есть категория - НАЗВАНИЕ должно содержать ключевое слово
             if must_contain:
                 has_keyword = False
                 for keyword in must_contain:
-                    if keyword in full_text:
+                    if keyword in title_lower:  # Только в названии!
                         has_keyword = True
                         break
                 if not has_keyword:
