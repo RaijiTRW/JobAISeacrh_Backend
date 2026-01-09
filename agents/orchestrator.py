@@ -159,18 +159,23 @@ class Orchestrator:
 
         # Tool calls
         tool_calls = message.get("tool_calls", [])
+        print(f"Tool calls received: {len(tool_calls)}")
         for tool_call in tool_calls:
+            print(f"Tool call: {tool_call.get('function', {}).get('name')}")
             if tool_call.get("function", {}).get("name") == "search_vacancies":
                 try:
                     args = json.loads(tool_call["function"]["arguments"])
+                    print(f"Search args: {args}")
                     filters = SearchFilters(**args)
                     result = await vacancy_search.search(filters)
+                    print(f"Search result: {len(result.vacancies)} vacancies found")
 
                     # Валидируем вакансии
                     validated = await self.validator.validate_batch(
                         result.vacancies,
                         preferences,
                     )
+                    print(f"Validated: {len(validated)} vacancies")
 
                     vacancies = [v.model_dump() for v in validated]
 
@@ -179,6 +184,8 @@ class Orchestrator:
                     )
                 except Exception as e:
                     print(f"Error processing tool call: {e}")
+                    import traceback
+                    traceback.print_exc()
 
         return ChatResponse(
             message=" ".join(text_parts) if text_parts else "Что-то пошло не так, попробуй ещё раз.",

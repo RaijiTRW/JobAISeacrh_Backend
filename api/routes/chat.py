@@ -140,7 +140,9 @@ async def send_message_stream(request: ChatMessageRequest):
             await asyncio.sleep(0.03)  # Имитация печати
 
         # Отправляем вакансии
+        print(f"Vacancies to send: {len(response.vacancies)}")
         if response.vacancies:
+            print(f"First vacancy: {response.vacancies[0] if response.vacancies else 'none'}")
             yield f"data: {json.dumps({'type': 'vacancies', 'content': response.vacancies}, default=json_serializer)}\n\n"
 
         # Завершение
