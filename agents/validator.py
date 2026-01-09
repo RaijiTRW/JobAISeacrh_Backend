@@ -12,6 +12,16 @@ from models.chat import UserPreferences
 class VacancyValidator:
     """Агент для проверки релевантности вакансий"""
 
+    # Контекстные стоп-слова: если в queries есть ключ — добавляем эти стоп-слова
+    CONTEXT_STOP_WORDS = {
+        "пвз": ["логист", "сборщик", "водитель", "кладовщик", "грузчик", "комплектовщик", "упаковщик"],
+        "пункт выдачи": ["логист", "сборщик", "водитель", "кладовщик", "грузчик", "комплектовщик"],
+        "wildberries": ["логист", "сборщик", "водитель", "кладовщик", "грузчик", "комплектовщик"],
+        "ozon": ["логист", "сборщик", "водитель", "кладовщик", "грузчик", "комплектовщик"],
+        "бариста": ["официант", "повар", "посудомойщик", "уборщик"],
+        "кассир": ["грузчик", "уборщик", "охранник"],
+    }
+
     def __init__(self):
         self.settings = get_settings()
 
@@ -19,6 +29,7 @@ class VacancyValidator:
         self,
         vacancies: list[Vacancy],
         preferences: UserPreferences,
+        queries: list[str] = None,
     ) -> list[Vacancy]:
         """
         Валидация списка вакансий
@@ -28,7 +39,7 @@ class VacancyValidator:
             return []
 
         # Сначала быстрая фильтрация по ключевым словам
-        filtered = self._quick_filter(vacancies, preferences)
+        filtered = self._quick_filter(vacancies, preferences, queries)
 
         # Если осталось много — используем AI для точной фильтрации
         if len(filtered) > 20:
@@ -40,20 +51,31 @@ class VacancyValidator:
         self,
         vacancies: list[Vacancy],
         preferences: UserPreferences,
+        queries: list[str] = None,
     ) -> list[Vacancy]:
         """Быстрая фильтрация без AI"""
         result = []
 
         # Стоп-слова (всегда фильтруем)
         stop_words = [
-            "курьер", "доставщик", "грузчик", "разнорабочий",
+            "курьер", "доставщик", "разнорабочий",
             "промоутер", "раздача листовок", "расклейщик",
         ]
+
+        # Добавляем контекстные стоп-слова на основе queries
+        if queries:
+            queries_lower = " ".join(queries).lower()
+            for context_key, context_stops in self.CONTEXT_STOP_WORDS.items():
+                if context_key in queries_lower:
+                    stop_words.extend(context_stops)
+                    print(f"[Validator] Added context stops for '{context_key}': {context_stops}")
 
         # Добавляем пользовательские исключения (приводим к нижнему регистру)
         user_exclusions = [w.lower().strip() for w in preferences.exclude_keywords]
         stop_words.extend(user_exclusions)
 
+        # Убираем дубликаты
+        stop_words = list(set(stop_words))
         print(f"[Validator] Filtering with stop_words: {stop_words}")
 
         for vacancy in vacancies:
