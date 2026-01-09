@@ -15,43 +15,6 @@ from config import get_settings
 class VacancySearchTool:
     """Единый инструмент поиска вакансий"""
 
-    # Расширение коротких/неоднозначных запросов (НА РУССКОМ для российских сайтов)
-    QUERY_EXPANSIONS = {
-        # IT
-        "ии": "машинное обучение OR data scientist OR нейросети OR искусственный интеллект",
-        "ai": "машинное обучение OR data scientist OR нейросети",
-        "ml": "машинное обучение OR data scientist OR аналитик данных",
-        "машинное обучение": "машинное обучение OR data scientist OR ML разработчик",
-        "data science": "аналитик данных OR data scientist OR машинное обучение",
-        "фронтенд": "фронтенд разработчик OR React OR Vue OR Angular",
-        "frontend": "фронтенд разработчик OR React OR Vue OR Angular",
-        "фронт": "фронтенд разработчик OR React OR Vue",
-        "бэкенд": "бэкенд разработчик OR Python разработчик OR Java разработчик",
-        "backend": "бэкенд разработчик OR Python разработчик OR серверная разработка",
-        "бэк": "бэкенд разработчик OR Python разработчик",
-        "smm": "SMM менеджер OR контент-менеджер OR маркетолог",
-        "seo": "SEO специалист OR поисковая оптимизация",
-        "devops": "DevOps инженер OR системный администратор OR SRE",
-        "qa": "тестировщик OR QA инженер OR тестирование",
-        "тестировщик": "тестировщик OR QA инженер OR автоматизация тестирования",
-        "аналитик": "аналитик OR бизнес-аналитик OR аналитик данных OR системный аналитик",
-        "дизайнер": "дизайнер OR UI/UX дизайнер OR графический дизайнер OR веб-дизайнер",
-        "ux": "UX дизайнер OR UI/UX дизайнер OR продуктовый дизайнер",
-        "ui": "UI дизайнер OR UI/UX дизайнер OR веб-дизайнер",
-        "pm": "менеджер продукта OR менеджер проекта OR продакт-менеджер",
-        "продакт": "менеджер продукта OR продакт-менеджер OR product owner",
-        # Маркетплейсы и ПВЗ
-        "пвз": "пункт выдачи OR Wildberries OR Ozon OR СДЭК OR оператор пвз",
-        "wildberries": "Wildberries OR пункт выдачи Wildberries OR WB",
-        "вайлдберриз": "Wildberries OR пункт выдачи Wildberries OR WB",
-        "вб": "Wildberries OR пункт выдачи Wildberries",
-        "озон": "Ozon OR пункт выдачи Ozon OR склад Ozon",
-        "ozon": "Ozon OR пункт выдачи Ozon OR склад Ozon",
-        "сдэк": "СДЭК OR пункт выдачи СДЭК OR курьер СДЭК",
-        "cdek": "СДЭК OR пункт выдачи СДЭК",
-        "маркетплейс": "Wildberries OR Ozon OR маркетплейс OR пункт выдачи",
-    }
-
     def __init__(self):
         self.settings = get_settings()
         self.parsers = [
@@ -60,39 +23,33 @@ class VacancySearchTool:
             SuperJobParser(),
         ]
 
-    def _expand_query(self, query: str) -> str:
-        """Расширяет короткие/неоднозначные запросы"""
-        query_lower = query.lower().strip()
-
-        # Проверяем точное совпадение
-        if query_lower in self.QUERY_EXPANSIONS:
-            expanded = self.QUERY_EXPANSIONS[query_lower]
-            print(f"[Search] Expanded query '{query}' -> '{expanded}'")
-            return expanded
-
-        # Если запрос слишком короткий (менее 3 символов) — не расширяем, вернём как есть
-        if len(query_lower) < 3:
-            print(f"[Search] Query '{query}' too short, using as-is")
-            return query
-
-        return query
-
     async def search(self, filters: SearchFilters) -> SearchResult:
         """
-        Поиск вакансий по всем источникам
+        Поиск вакансий по всем источникам.
+        Поддерживает параллельный поиск по нескольким запросам (queries).
         """
-        # Расширяем запрос если нужно
-        original_query = filters.query
-        filters.query = self._expand_query(filters.query)
-        print(f"[Search] Searching for: '{filters.query}' (original: '{original_query}')")
+        queries = filters.queries
+        print(f"[Search] Searching with {len(queries)} queries: {queries}")
 
-        # Запускаем все парсеры параллельно
-        tasks = [
-            parser.search(filters, limit=self.settings.max_vacancies_per_source)
-            for parser in self.parsers
-        ]
+        # Собираем задачи: каждый запрос × каждый парсер
+        all_tasks = []
+        for query in queries:
+            single_filter = SearchFilters(
+                query=query,
+                city=filters.city,
+                salary_from=filters.salary_from,
+                salary_to=filters.salary_to,
+                experience=filters.experience,
+                employment_type=filters.employment_type,
+                exclude_keywords=filters.exclude_keywords,
+            )
+            for parser in self.parsers:
+                all_tasks.append(
+                    parser.search(single_filter, limit=self.settings.max_vacancies_per_source)
+                )
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        print(f"[Search] Running {len(all_tasks)} parallel tasks ({len(queries)} queries × {len(self.parsers)} parsers)")
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
         # Собираем все вакансии
         all_vacancies: list[Vacancy] = []
@@ -110,6 +67,8 @@ class VacancySearchTool:
             if key not in seen:
                 seen.add(key)
                 unique_vacancies.append(v)
+
+        print(f"[Search] Found {len(all_vacancies)} total, {len(unique_vacancies)} unique")
 
         # Сортируем по зарплате (сначала с указанной)
         unique_vacancies.sort(
@@ -134,23 +93,27 @@ class VacancySearchTool:
             "name": "search_vacancies",
             "description": """Поиск вакансий на hh.ru, Avito и SuperJob.
 
-ВАЖНО: Запросы НА РУССКОМ! Названия брендов (Wildberries, Ozon, Python) можно как есть.
+ВАЖНО: Генерируй 3-6 РАЗНЫХ вариантов запроса в queries для максимального охвата!
+Запросы НА РУССКОМ! Названия брендов (Wildberries, Ozon, Python) можно как есть.
 
-Примеры query:
-- "ИИ/AI" → "машинное обучение OR data scientist OR нейросети"
-- "фронтенд" → "фронтенд разработчик OR React OR Vue"
-- "питон" → "Python разработчик OR Django"
-- "пвз" → "пункт выдачи OR Wildberries OR Ozon OR оператор пвз"
-- "вайлдберриз" → "Wildberries OR пункт выдачи Wildberries"
-- Используй OR для вариантов
-- НЕ добавляй лишние профессии (бариста, сборщик) если не просили!
+Примеры queries:
+- "ПВЗ" → queries: ["пункт выдачи заказов", "менеджер пвз", "оператор пвз", "Wildberries", "Ozon"]
+- "вайлдберриз" → queries: ["Wildberries", "пункт выдачи Wildberries", "WB", "вайлдберриз"]
+- "фронтенд" → queries: ["фронтенд разработчик", "frontend developer", "React разработчик", "Vue разработчик"]
+- "питон" → queries: ["Python разработчик", "Python developer", "Django", "FastAPI"]
+- "ИИ" → queries: ["машинное обучение", "data scientist", "ML инженер", "нейросети"]
+
+НЕ добавляй несвязанные профессии! "ПВЗ" — только пункты выдачи, не курьер/сборщик.
 """,
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Поисковый запрос НА РУССКОМ. Названия языков можно оставлять (Python, React). Примеры: 'Python разработчик OR Django', 'машинное обучение OR data scientist', 'фронтенд разработчик OR React'."
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Список вариантов поисковых запросов (3-6 штук). Генерируй синонимы и альтернативные названия профессии!",
+                        "minItems": 1,
+                        "maxItems": 6
                     },
                     "city": {
                         "type": "string",
@@ -180,7 +143,7 @@ class VacancySearchTool:
                         "description": "Слова для исключения из результатов"
                     }
                 },
-                "required": ["query", "city"]
+                "required": ["queries", "city"]
             }
         }
 

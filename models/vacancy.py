@@ -30,7 +30,8 @@ class Vacancy(BaseModel):
 
 
 class SearchFilters(BaseModel):
-    query: str
+    query: Optional[str] = None        # Для парсеров (один запрос)
+    queries: list[str] = []            # Для tool (массив от ИИ)
     city: Optional[str] = None
     salary_from: Optional[int] = None
     salary_to: Optional[int] = None
