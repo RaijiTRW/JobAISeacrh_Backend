@@ -26,13 +26,19 @@ class VacancySearchTool:
     async def search(self, filters: SearchFilters) -> SearchResult:
         """
         Поиск вакансий по всем источникам.
-        Поддерживает параллельный поиск по нескольким запросам (queries).
+        HH: все queries параллельно
+        Avito: 3 queries ПОСЛЕДОВАТЕЛЬНО (rate limiting)
+        SuperJob: все queries параллельно
         """
         queries = filters.queries
         print(f"[Search] Searching with {len(queries)} queries: {queries}")
 
-        # Собираем задачи: каждый запрос × каждый парсер
-        all_tasks = []
+        hh_parser = self.parsers[0]  # HHParser
+        avito_parser = self.parsers[1]  # AvitoParser
+        sj_parser = self.parsers[2]  # SuperJobParser
+
+        # HH и SuperJob - все queries параллельно
+        parallel_tasks = []
         for query in queries:
             single_filter = SearchFilters(
                 query=query,
@@ -43,13 +49,35 @@ class VacancySearchTool:
                 employment_type=filters.employment_type,
                 exclude_keywords=filters.exclude_keywords,
             )
-            for parser in self.parsers:
-                all_tasks.append(
-                    parser.search(single_filter, limit=self.settings.max_vacancies_per_source)
-                )
+            parallel_tasks.append(hh_parser.search(single_filter, limit=self.settings.max_vacancies_per_source))
+            parallel_tasks.append(sj_parser.search(single_filter, limit=self.settings.max_vacancies_per_source))
 
-        print(f"[Search] Running {len(all_tasks)} parallel tasks ({len(queries)} queries × {len(self.parsers)} parsers)")
-        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        print(f"[Search] Running {len(parallel_tasks)} parallel tasks (HH + SuperJob)")
+        parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+
+        # Avito - до 3 queries ПОСЛЕДОВАТЕЛЬНО (с паузами между запросами)
+        avito_queries = queries[:3]  # Максимум 3 запроса
+        avito_results = []
+        print(f"[Search] Running {len(avito_queries)} Avito queries sequentially")
+        for query in avito_queries:
+            avito_filter = SearchFilters(
+                query=query,
+                city=filters.city,
+                salary_from=filters.salary_from,
+                salary_to=filters.salary_to,
+                experience=filters.experience,
+                employment_type=filters.employment_type,
+                exclude_keywords=filters.exclude_keywords,
+            )
+            try:
+                result = await avito_parser.search(avito_filter, limit=self.settings.max_vacancies_per_source)
+                avito_results.append(result)
+            except Exception as e:
+                print(f"[Search] Avito error: {e}")
+                avito_results.append([])
+
+        # Объединяем все результаты
+        results = list(parallel_results) + avito_results
 
         # Собираем все вакансии
         all_vacancies: list[Vacancy] = []
