@@ -5,11 +5,11 @@
 
 import asyncio
 from typing import Optional
-from app.models.vacancy import Vacancy, SearchFilters, SearchResult
-from app.tools.parsers.hh import HHParser
-from app.tools.parsers.avito import AvitoParser
-from app.tools.parsers.superjob import SuperJobParser
-from app.config import get_settings
+from models.vacancy import Vacancy, SearchFilters, SearchResult
+from tools.parsers.hh import HHParser
+from tools.parsers.avito import AvitoParser
+from tools.parsers.superjob import SuperJobParser
+from config import get_settings
 
 
 class VacancySearchTool:

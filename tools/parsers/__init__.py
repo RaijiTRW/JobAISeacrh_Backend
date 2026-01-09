@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from app.models.vacancy import Vacancy, SearchFilters
+from models.vacancy import Vacancy, SearchFilters
 
 
 class BaseParser(ABC):

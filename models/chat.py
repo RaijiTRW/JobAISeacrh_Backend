@@ -38,7 +38,7 @@ class UserPreferences(BaseModel):
         return bool(self.query and self.city)
 
     def to_filters(self):
-        from app.models.vacancy import SearchFilters
+        from models.vacancy import SearchFilters
         return SearchFilters(
             query=self.query or "",
             city=self.city,

@@ -8,8 +8,8 @@ from typing import Optional
 from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import quote
-from app.tools.parsers import BaseParser
-from app.models.vacancy import Vacancy, SearchFilters
+from tools.parsers import BaseParser
+from models.vacancy import Vacancy, SearchFilters
 
 
 class AvitoParser(BaseParser):

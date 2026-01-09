@@ -6,11 +6,11 @@
 
 import json
 import httpx
-from app.config import get_settings
-from app.models.chat import ChatRequest, ChatResponse, UserPreferences
-from app.models.vacancy import SearchFilters
-from app.tools.search import vacancy_search
-from app.agents.validator import VacancyValidator
+from config import get_settings
+from models.chat import ChatRequest, ChatResponse, UserPreferences
+from models.vacancy import SearchFilters
+from tools.search import vacancy_search
+from agents.validator import VacancyValidator
 
 
 SYSTEM_PROMPT = """Ты — AI-помощник для поиска работы в России. Твоя задача — помочь пользователю найти подходящие вакансии.

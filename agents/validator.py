@@ -4,9 +4,9 @@
 """
 
 import httpx
-from app.config import get_settings
-from app.models.vacancy import Vacancy
-from app.models.chat import UserPreferences
+from config import get_settings
+from models.vacancy import Vacancy
+from models.chat import UserPreferences
 
 
 class VacancyValidator:

@@ -6,8 +6,8 @@
 import httpx
 from typing import Optional
 from datetime import datetime
-from app.tools.parsers import BaseParser
-from app.models.vacancy import Vacancy, SearchFilters
+from tools.parsers import BaseParser
+from models.vacancy import Vacancy, SearchFilters
 
 
 class HHParser(BaseParser):

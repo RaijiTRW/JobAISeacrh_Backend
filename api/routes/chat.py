@@ -9,9 +9,9 @@ from typing import Optional
 import json
 import asyncio
 
-from app.models.chat import ChatRequest, ChatResponse, UserPreferences
-from app.agents.orchestrator import orchestrator
-from app.config import get_settings
+from models.chat import ChatRequest, ChatResponse, UserPreferences
+from agents.orchestrator import orchestrator
+from config import get_settings
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
