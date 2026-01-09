@@ -20,6 +20,27 @@ class AvitoParser(BaseParser):
     name = "avito"
     base_url = "https://www.avito.ru"
     _last_request_time = 0  # Для rate limiting
+    _request_count = 0  # Счётчик запросов для ротации
+
+    # Пул User-Agent'ов для ротации
+    USER_AGENTS = [
+        # Chrome Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        # Chrome Mac
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        # Firefox Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+        # Firefox Mac
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
+        # Safari Mac
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+        # Edge
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+    ]
 
     async def search(self, filters: SearchFilters, limit: int = 20) -> list[Vacancy]:
         """Поиск вакансий на Avito"""
@@ -30,11 +51,16 @@ class AvitoParser(BaseParser):
             import time
             current_time = time.time()
             time_since_last = current_time - AvitoParser._last_request_time
-            if time_since_last < 2.0:  # Минимум 2 секунды между запросами
-                wait_time = 2.0 - time_since_last + random.uniform(0.5, 1.5)
+
+            # Увеличенные задержки: 3-6 секунд между запросами
+            min_delay = 3.0
+            if time_since_last < min_delay:
+                wait_time = min_delay - time_since_last + random.uniform(1.0, 3.0)
                 print(f"[Avito] Rate limit: waiting {wait_time:.1f}s")
                 await asyncio.sleep(wait_time)
+
             AvitoParser._last_request_time = time.time()
+            AvitoParser._request_count += 1
 
             city_slug = self._get_city_slug(filters.city)
             url = f"{self.base_url}/{city_slug}/vakansii"
@@ -47,20 +73,31 @@ class AvitoParser(BaseParser):
             if filters.salary_from:
                 params["pmin"] = filters.salary_from
 
-            # Более реалистичные заголовки браузера
+            # Ротация User-Agent
+            user_agent = self.USER_AGENTS[AvitoParser._request_count % len(self.USER_AGENTS)]
+            print(f"[Avito] Using User-Agent #{AvitoParser._request_count % len(self.USER_AGENTS)}")
+
+            # Варианты Accept-Language для разнообразия
+            accept_languages = [
+                "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "ru,en-US;q=0.9,en;q=0.8",
+                "ru-RU,ru;q=0.9",
+            ]
+
+            # Реалистичные заголовки браузера с ротацией
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                "User-Agent": user_agent,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Language": random.choice(accept_languages),
                 "Accept-Encoding": "gzip, deflate, br",
-                "DNT": "1",
+                "DNT": str(random.randint(0, 1)),
                 "Connection": "keep-alive",
                 "Upgrade-Insecure-Requests": "1",
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
                 "Sec-Fetch-Site": "none",
                 "Sec-Fetch-User": "?1",
-                "Cache-Control": "max-age=0",
+                "Cache-Control": random.choice(["max-age=0", "no-cache"]),
             }
 
             print(f"[Avito] Searching: {url} with params: {params}")
@@ -110,9 +147,11 @@ class AvitoParser(BaseParser):
                 elif response.status_code == 403:
                     print("[Avito] Access denied (403) - Avito blocked the request")
                 elif response.status_code == 429:
-                    print("[Avito] Rate limited (429) - skipping this query")
-                    # Увеличиваем время ожидания для следующего запроса
-                    AvitoParser._last_request_time = time.time() + 5.0
+                    print("[Avito] Rate limited (429) - backing off")
+                    # Увеличиваем время ожидания для следующего запроса (10-15 секунд)
+                    backoff_time = random.uniform(10.0, 15.0)
+                    AvitoParser._last_request_time = time.time() + backoff_time
+                    print(f"[Avito] Next request delayed by {backoff_time:.1f}s")
                 else:
                     print(f"[Avito] Unexpected status: {response.status_code}")
 
