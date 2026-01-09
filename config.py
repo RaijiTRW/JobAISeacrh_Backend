@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000"]
 
     # AI Settings
-    model_name: str = "anthropic/claude-sonnet-4-5-20250514"
+    model_name: str = "anthropic/claude-sonnet-4"
     max_tokens: int = 4096
 
     # Search settings

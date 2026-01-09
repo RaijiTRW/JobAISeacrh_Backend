@@ -77,6 +77,8 @@ class OpenRouterClient:
                 json=payload,
                 timeout=60.0,
             )
+            if response.status_code != 200:
+                print(f"OpenRouter error [{response.status_code}]: {response.text}")
             response.raise_for_status()
             return response.json()
 
