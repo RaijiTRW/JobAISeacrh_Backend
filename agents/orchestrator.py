@@ -6,11 +6,13 @@
 
 import json
 import httpx
+from typing import Optional
 from config import get_settings
 from models.chat import ChatRequest, ChatResponse, UserPreferences
 from models.vacancy import SearchFilters
 from tools.search import vacancy_search
 from agents.validator import VacancyValidator
+from services.user_profile import UserData
 
 
 SYSTEM_PROMPT = """Ты — AI-помощник для поиска работы в России. Твоя задача — помочь пользователю найти подходящие вакансии.
@@ -21,6 +23,8 @@ SYSTEM_PROMPT = """Ты — AI-помощник для поиска работы
 3. Когда есть достаточно информации — используй инструмент search_vacancies
 4. Отвечай кратко и по делу, без воды
 5. Используй разговорный русский язык
+6. ВАЖНО: Если знаешь имя пользователя — обращайся к нему по имени!
+7. Используй данные из резюме пользователя для подбора вакансий (навыки, опыт, желаемая должность)
 
 УТОЧНЯЮЩИЕ ВОПРОСЫ (задавай если не указано):
 - Город/регион для поиска
@@ -97,9 +101,10 @@ class Orchestrator:
         request: ChatRequest,
         history: list[dict],
         preferences: UserPreferences,
+        user_data: Optional[UserData] = None,
     ) -> ChatResponse:
         """Обработка сообщения пользователя"""
-        context = self._build_context(preferences)
+        context = self._build_context(preferences, user_data)
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -194,27 +199,104 @@ class Orchestrator:
             chat_id=str(hash(str(preferences))),
         )
 
-    def _build_context(self, preferences: UserPreferences) -> str:
-        """Формирование контекста из предпочтений"""
-        parts = ["Известно о пользователе:"]
+    def _build_context(self, preferences: UserPreferences, user_data: Optional[UserData] = None) -> str:
+        """Формирование контекста из предпочтений и данных пользователя"""
+        parts = []
 
+        # Данные из профиля
+        if user_data and user_data.profile:
+            profile = user_data.profile
+            profile_parts = ["ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:"]
+
+            if profile.first_name:
+                name_parts = []
+                if profile.first_name:
+                    name_parts.append(profile.first_name)
+                if profile.last_name:
+                    name_parts.append(profile.last_name)
+                if profile.patronymic:
+                    name_parts.append(profile.patronymic)
+                profile_parts.append(f"- Имя: {' '.join(name_parts)}")
+
+            if profile.city:
+                profile_parts.append(f"- Город проживания: {profile.city}")
+            if profile.phone:
+                profile_parts.append(f"- Телефон: {profile.phone}")
+
+            if len(profile_parts) > 1:
+                parts.append("\n".join(profile_parts))
+
+        # Данные из резюме
+        if user_data and user_data.resume:
+            resume = user_data.resume
+            resume_parts = ["РЕЗЮМЕ ПОЛЬЗОВАТЕЛЯ:"]
+
+            if resume.desired_position:
+                resume_parts.append(f"- Желаемая должность: {resume.desired_position}")
+            if resume.desired_salary:
+                resume_parts.append(f"- Желаемая зарплата: {resume.desired_salary}")
+            if resume.skills:
+                resume_parts.append(f"- Навыки: {resume.skills}")
+            if resume.about:
+                resume_parts.append(f"- О себе: {resume.about}")
+
+            # Опыт работы
+            if resume.work_experience:
+                exp_parts = ["- Опыт работы:"]
+                for exp in resume.work_experience[:3]:  # Максимум 3 места
+                    exp_str = f"  • {exp.position or 'Должность не указана'}"
+                    if exp.company:
+                        exp_str += f" в {exp.company}"
+                    if exp.start_date:
+                        exp_str += f" ({exp.start_date}"
+                        if exp.is_current:
+                            exp_str += " - настоящее время)"
+                        elif exp.end_date:
+                            exp_str += f" - {exp.end_date})"
+                        else:
+                            exp_str += ")"
+                    exp_parts.append(exp_str)
+                resume_parts.extend(exp_parts)
+
+            # Образование
+            if resume.education:
+                edu_parts = ["- Образование:"]
+                for edu in resume.education[:2]:  # Максимум 2 записи
+                    edu_str = f"  • {edu.degree or ''} {edu.field or ''}".strip()
+                    if edu.institution:
+                        edu_str += f", {edu.institution}"
+                    if edu.end_year:
+                        edu_str += f" ({edu.end_year})"
+                    if edu_str.strip():
+                        edu_parts.append(edu_str)
+                if len(edu_parts) > 1:
+                    resume_parts.extend(edu_parts)
+
+            if len(resume_parts) > 1:
+                parts.append("\n".join(resume_parts))
+
+        # Предпочтения поиска
+        pref_parts = ["ТЕКУЩИЙ ПОИСК:"]
         if preferences.query:
-            parts.append(f"- Ищет: {preferences.query}")
+            pref_parts.append(f"- Ищет: {preferences.query}")
         if preferences.city:
-            parts.append(f"- Город: {preferences.city}")
+            pref_parts.append(f"- Город поиска: {preferences.city}")
         if preferences.salary_from:
-            parts.append(f"- Зарплата от: {preferences.salary_from} ₽")
+            pref_parts.append(f"- Зарплата от: {preferences.salary_from} ₽")
         if preferences.experience:
-            parts.append(f"- Опыт: {preferences.experience}")
+            pref_parts.append(f"- Требуемый опыт: {preferences.experience}")
         if preferences.employment_type:
-            parts.append(f"- Формат: {preferences.employment_type}")
+            pref_parts.append(f"- Формат работы: {preferences.employment_type}")
         if preferences.exclude_keywords:
-            parts.append(f"- Не предлагать: {', '.join(preferences.exclude_keywords)}")
+            pref_parts.append(f"- Не предлагать: {', '.join(preferences.exclude_keywords)}")
 
-        if len(parts) == 1:
-            return "Пока ничего не известно о предпочтениях пользователя."
+        if len(pref_parts) > 1:
+            parts.append("\n".join(pref_parts))
 
-        return "\n".join(parts)
+        if not parts:
+            return "Пока ничего не известно о пользователе."
+
+        return "\n\n".join(parts)
 
     async def extract_preferences(self, message: str, current: UserPreferences) -> UserPreferences:
         """Извлечение предпочтений из сообщения пользователя"""
@@ -246,7 +328,17 @@ class Orchestrator:
 - salary_from: минимальная зарплата (число)
 - experience: опыт (no_experience, 1-3, 3-6, 6+)
 - employment_type: формат (full, part, remote)
-- exclude_keywords: что не предлагать (массив строк)
+- exclude_keywords: что ИСКЛЮЧИТЬ из поиска (массив строк) — это могут быть:
+  * названия компаний (Пятёрочка, Магнит, Wildberries)
+  * типы работ (курьер, продажи, холодные звонки)
+  * адреса или районы
+  * любые другие слова для исключения
+
+ВАЖНО для exclude_keywords: Если пользователь говорит "убрать/убери/удали/не показывай/без" чего-то — добавь это в exclude_keywords.
+Примеры:
+- "убрать пятёрочку" -> exclude_keywords: ["пятёрочка"]
+- "без магнита" -> exclude_keywords: ["магнит"]
+- "не показывай вакансии с холодными звонками" -> exclude_keywords: ["холодные звонки"]
 
 Новое сообщение: {message}
 
@@ -278,12 +370,16 @@ JSON (только новые данные):"""
                 if data.get("employment_type"):
                     current.employment_type = data["employment_type"]
                 if data.get("exclude_keywords"):
-                    current.exclude_keywords.extend(data["exclude_keywords"])
+                    new_keywords = data["exclude_keywords"]
+                    print(f"[Orchestrator] New exclude_keywords from message: {new_keywords}")
+                    current.exclude_keywords.extend(new_keywords)
 
         except Exception as e:
             print(f"Error extracting preferences: {e}")
+            import traceback
+            traceback.print_exc()
 
-        print(f"Current preferences: query={current.query}, city={current.city}, salary={current.salary_from}, exp={current.experience}")
+        print(f"[Orchestrator] Current preferences: query={current.query}, city={current.city}, salary={current.salary_from}, exp={current.experience}, exclude={current.exclude_keywords}")
         return current
 
 

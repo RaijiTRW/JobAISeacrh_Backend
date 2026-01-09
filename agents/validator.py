@@ -50,14 +50,35 @@ class VacancyValidator:
             "промоутер", "раздача листовок", "расклейщик",
         ]
 
-        # Добавляем пользовательские исключения
-        stop_words.extend([w.lower() for w in preferences.exclude_keywords])
+        # Добавляем пользовательские исключения (приводим к нижнему регистру)
+        user_exclusions = [w.lower().strip() for w in preferences.exclude_keywords]
+        stop_words.extend(user_exclusions)
+
+        print(f"[Validator] Filtering with stop_words: {stop_words}")
 
         for vacancy in vacancies:
-            text = f"{vacancy.title} {vacancy.description}".lower()
+            # Объединяем ВСЕ текстовые поля вакансии для проверки
+            text_parts = [
+                vacancy.title or "",
+                vacancy.company or "",
+                vacancy.description or "",
+                vacancy.city or "",
+            ]
+            # Добавляем URL тоже (может содержать название компании)
+            if vacancy.url:
+                text_parts.append(vacancy.url)
+
+            full_text = " ".join(text_parts).lower()
 
             # Проверка стоп-слов
-            if any(word in text for word in stop_words):
+            excluded = False
+            for word in stop_words:
+                if word and word in full_text:
+                    print(f"[Validator] Excluded vacancy '{vacancy.title}' by keyword '{word}'")
+                    excluded = True
+                    break
+
+            if excluded:
                 continue
 
             # Проверка зарплаты
@@ -67,6 +88,7 @@ class VacancyValidator:
 
             result.append(vacancy)
 
+        print(f"[Validator] Quick filter: {len(vacancies)} -> {len(result)} vacancies")
         return result
 
     async def _ai_filter(

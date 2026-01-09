@@ -19,6 +19,7 @@ def json_serializer(obj):
 
 from models.chat import ChatRequest, ChatResponse, UserPreferences
 from agents.orchestrator import orchestrator
+from services.user_profile import user_profile_service
 from config import get_settings
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -55,6 +56,9 @@ async def send_message(request: ChatMessageRequest):
 
     session = sessions[session_key]
 
+    # Получаем данные профиля пользователя
+    user_data = await user_profile_service.get_user_data(request.user_id)
+
     # Извлекаем предпочтения из сообщения
     session["preferences"] = await orchestrator.extract_preferences(
         request.message,
@@ -78,6 +82,7 @@ async def send_message(request: ChatMessageRequest):
         chat_request,
         session["history"],
         session["preferences"],
+        user_data,
     )
 
     # Добавляем ответ в историю
@@ -108,6 +113,9 @@ async def send_message_stream(request: ChatMessageRequest):
 
     session = sessions[session_key]
 
+    # Получаем данные профиля пользователя
+    user_data = await user_profile_service.get_user_data(request.user_id)
+
     # Извлекаем предпочтения
     session["preferences"] = await orchestrator.extract_preferences(
         request.message,
@@ -131,6 +139,7 @@ async def send_message_stream(request: ChatMessageRequest):
             chat_request,
             session["history"],
             session["preferences"],
+            user_data,
         )
 
         # Стримим текст по словам
