@@ -12,14 +12,11 @@ from models.chat import UserPreferences
 class VacancyValidator:
     """Агент для проверки релевантности вакансий"""
 
-    # Контекстные стоп-слова: если в queries есть ключ — добавляем эти стоп-слова
+    # Контекстные стоп-слова: минимальный набор, только явный мусор
+    # Для ПВЗ НЕ добавляем стоп-слова - пусть AI фильтрует
     CONTEXT_STOP_WORDS = {
-        "пвз": ["логист", "сборщик", "водитель", "кладовщик", "грузчик", "комплектовщик", "упаковщик"],
-        "пункт выдачи": ["логист", "сборщик", "водитель", "кладовщик", "грузчик", "комплектовщик"],
-        "wildberries": ["логист", "сборщик", "водитель", "кладовщик", "грузчик", "комплектовщик"],
-        "ozon": ["логист", "сборщик", "водитель", "кладовщик", "грузчик", "комплектовщик"],
-        "бариста": ["официант", "повар", "посудомойщик", "уборщик"],
-        "кассир": ["грузчик", "уборщик", "охранник"],
+        "бариста": ["официант", "повар", "посудомойщик"],
+        "кассир": ["грузчик", "охранник"],
     }
 
     def __init__(self):
@@ -38,14 +35,22 @@ class VacancyValidator:
         if not vacancies:
             return []
 
-        # Сначала быстрая фильтрация по ключевым словам
-        filtered = self._quick_filter(vacancies, preferences, queries)
+        print(f"[Validator] Input: {len(vacancies)} vacancies, queries={queries}")
 
-        # Если осталось много — используем AI для точной фильтрации
-        if len(filtered) > 20:
-            filtered = await self._ai_filter(filtered, preferences)
+        # Сначала убираем только явный мусор (курьеры, промоутеры)
+        pre_filtered = self._quick_filter(vacancies, preferences, queries)
+        print(f"[Validator] After quick filter: {len(pre_filtered)} vacancies")
 
-        return filtered
+        # Если много вакансий — AI фильтрует точнее
+        if len(pre_filtered) > 15:
+            filtered = await self._ai_filter(pre_filtered, preferences)
+            # Fallback: если AI вернул 0, берём первые 15 из pre_filtered
+            if len(filtered) == 0:
+                print(f"[Validator] AI returned 0, using pre_filtered")
+                return pre_filtered[:15]
+            return filtered
+
+        return pre_filtered
 
     def _quick_filter(
         self,
@@ -140,23 +145,27 @@ class VacancyValidator:
         for i, v in enumerate(vacancies[:30]):  # Ограничиваем для экономии токенов
             vacancy_list.append(f"{i}. {v.title} | {v.company} | {v.salary_display} | {v.city}")
 
-        prompt = f"""Ты — фильтр вакансий. Проверь каждую вакансию на соответствие запросу.
+        prompt = f"""Ты — умный фильтр вакансий.
 
-ПРЕДПОЧТЕНИЯ ПОЛЬЗОВАТЕЛЯ:
+ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
 {pref_text}
 
 ВАКАНСИИ:
 {chr(10).join(vacancy_list)}
 
-ЗАДАЧА:
-Верни ТОЛЬКО номера вакансий, которые ПОДХОДЯТ пользователю.
-Отфильтруй:
-- Явно нерелевантные должности
-- Вакансии с подозрительно низкой зарплатой для должности
-- Скрытые "холодные продажи", MLM, сетевой маркетинг
-- Курьеров, промоутеров если это не запрашивалось
+ПРАВИЛА ФИЛЬТРАЦИИ:
 
-Ответ — только числа через запятую. Пример: 0, 2, 5, 7"""
+Для ПВЗ (пункт выдачи заказов):
+✓ ВКЛЮЧАЙ: менеджер ПВЗ, сотрудник ПВЗ, оператор ПВЗ, администратор пункта выдачи, кассир ПВЗ
+✗ ИСКЛЮЧАЙ: сборщик, комплектовщик, кладовщик, логист, грузчик, водитель, курьер — это СКЛАД!
+
+Общие правила:
+- Исключай MLM, сетевой маркетинг, пирамиды
+- Исключай курьеров, промоутеров (если не просили)
+- Если сомневаешься — ВКЛЮЧАЙ вакансию
+
+Верни номера подходящих вакансий через запятую.
+Ответ (только числа):"""
 
         try:
             headers = {
@@ -170,6 +179,7 @@ class VacancyValidator:
                 "model": self.settings.model_name,
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 200,
+                "temperature": 0,  # Стабильный результат
             }
 
             async with httpx.AsyncClient() as client:
