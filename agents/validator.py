@@ -70,37 +70,42 @@ class VacancyValidator:
                     stop_words.extend(context_stops)
                     print(f"[Validator] Added context stops for '{context_key}': {context_stops}")
 
-        # Добавляем пользовательские исключения (приводим к нижнему регистру)
-        user_exclusions = [w.lower().strip() for w in preferences.exclude_keywords]
-        stop_words.extend(user_exclusions)
+        # Пользовательские исключения отдельно (проверяются по всему тексту)
+        user_exclusions = [w.lower().strip() for w in preferences.exclude_keywords if w]
 
-        # Убираем дубликаты
+        # Убираем дубликаты из стоп-слов
         stop_words = list(set(stop_words))
-        print(f"[Validator] Filtering with stop_words: {stop_words}")
+        print(f"[Validator] Stop words (title only): {stop_words}")
+        print(f"[Validator] User exclusions (full text): {user_exclusions}")
 
         for vacancy in vacancies:
-            # Объединяем ВСЕ текстовые поля вакансии для проверки
-            text_parts = [
-                vacancy.title or "",
-                vacancy.company or "",
-                vacancy.description or "",
-                vacancy.city or "",
-            ]
-            # Добавляем URL тоже (может содержать название компании)
-            if vacancy.url:
-                text_parts.append(vacancy.url)
+            title_lower = (vacancy.title or "").lower()
+            company_lower = (vacancy.company or "").lower()
 
-            full_text = " ".join(text_parts).lower()
+            # Полный текст только для пользовательских исключений
+            full_text = f"{title_lower} {company_lower} {(vacancy.description or '').lower()}"
 
-            # Проверка стоп-слов
+            # Проверка стоп-слов ТОЛЬКО в названии (title)
+            # Это важно! В описании ПВЗ может быть "приём от водителя" - это ок
             excluded = False
             for word in stop_words:
-                if word and word in full_text:
-                    print(f"[Validator] Excluded vacancy '{vacancy.title}' by keyword '{word}'")
+                if word and word in title_lower:
+                    print(f"[Validator] Excluded '{vacancy.title}' - stop word '{word}' in title")
                     excluded = True
                     break
 
             if excluded:
+                continue
+
+            # Пользовательские исключения проверяем везде (осознанный выбор)
+            user_excluded = False
+            for word in user_exclusions:
+                if word and word in full_text:
+                    print(f"[Validator] Excluded '{vacancy.title}' - user exclusion '{word}'")
+                    user_excluded = True
+                    break
+
+            if user_excluded:
                 continue
 
             # Проверка зарплаты
