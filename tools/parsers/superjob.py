@@ -152,8 +152,17 @@ class SuperJobParser(BaseParser):
 
     def _get_city_slug(self, city: str) -> str:
         """Получить slug города для URL"""
+        if not city:
+            return ""
         city_lower = city.lower().strip()
-        return self.CITY_SLUGS.get(city_lower, city_lower.replace(" ", "-"))
+        # Если передали "россия" — это вся страна (без slug)
+        if city_lower in ("россия", "russia", "рф", "rf"):
+            return ""
+        slug = self.CITY_SLUGS.get(city_lower)
+        if slug:
+            return slug
+        # Если город не в словаре — ищем по всей России
+        return ""
 
     def _parse_vacancy(self, item, city: str) -> Optional[Vacancy]:
         """Парсинг вакансии из HTML"""

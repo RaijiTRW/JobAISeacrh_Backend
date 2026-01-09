@@ -46,7 +46,7 @@ class AvitoParser(BaseParser):
         vacancies = []
 
         try:
-            city_slug = self._get_city_slug(filters.city) if filters.city else "rossiya"
+            city_slug = self._get_city_slug(filters.city) if filters.city else "russia"
             url = f"{self.base_url}/{city_slug}/vakansii"
 
             params = {}
@@ -136,8 +136,17 @@ class AvitoParser(BaseParser):
 
     def _get_city_slug(self, city: str) -> str:
         """Получить slug города для URL"""
+        if not city:
+            return "russia"
         city_lower = city.lower().strip()
-        return self.CITY_SLUGS.get(city_lower, city_lower.replace(" ", "_").replace("-", "_"))
+        # Если передали "россия" — это вся страна
+        if city_lower in ("россия", "russia", "рф", "rf"):
+            return "russia"
+        slug = self.CITY_SLUGS.get(city_lower)
+        if slug:
+            return slug
+        # Если город не в словаре — используем всю Россию
+        return "russia"
 
     def _parse_vacancy(self, item, city: str) -> Optional[Vacancy]:
         """Парсинг вакансии из HTML"""

@@ -5,6 +5,7 @@
 """
 
 import json
+import re
 import httpx
 from typing import Optional
 from config import get_settings
@@ -17,28 +18,72 @@ from services.user_profile import UserData
 
 SYSTEM_PROMPT = """Ты — AI-помощник для поиска работы в России. Твоя задача — помочь пользователю найти подходящие вакансии.
 
-ПРАВИЛА:
-1. Если пользователь не указал город или сферу работы — обязательно уточни
-2. Задавай вопросы по одному, не перегружай пользователя
-3. Когда есть достаточно информации — используй инструмент search_vacancies
-4. Отвечай кратко и по делу, без воды
-5. Используй разговорный русский язык
-6. ВАЖНО: Если знаешь имя пользователя — обращайся к нему по имени!
-7. Используй данные из резюме пользователя для подбора вакансий (навыки, опыт, желаемая должность)
+ТВОЯ ГЛАВНАЯ ЗАДАЧА — ПРЕОБРАЗОВАТЬ ЗАПРОС ПОЛЬЗОВАТЕЛЯ В ПРАВИЛЬНЫЙ ПОИСКОВЫЙ ЗАПРОС:
 
-УТОЧНЯЮЩИЕ ВОПРОСЫ (задавай если не указано):
-- Город/регион для поиска
-- Сфера деятельности / должность
-- Желаемая зарплата (от)
-- Опыт работы
-- Формат работы (офис/удалёнка/гибрид)
-- Что НЕ предлагать (курьеры, продажи и т.д.)
+Пользователь может писать размыто или сокращённо. Ты должен понять что он ищет и сформулировать query для поиска.
+Технические термины пиши как принято (Python, React, Machine Learning) — на сайтах вакансий они так и называются.
+
+Примеры преобразования:
+- "ИИ" или "AI" → query: "Machine Learning OR Data Science OR ML engineer"
+- "фронт" или "фронтенд" → query: "Frontend OR React OR Vue"
+- "бэк" или "бэкенд" → query: "Backend OR Python OR Node.js"
+- "питон" → query: "Python OR Django OR FastAPI"
+- "программист" → уточни: какой язык? (Python, Java, JavaScript, C++ и т.д.)
+- "менеджер" → уточни: какой? (Product Manager, Project Manager, менеджер по продажам)
+- "аналитик" → уточни: какой? (Data Analyst, бизнес-аналитик, системный аналитик)
+- "в IT" → уточни: какая роль? (разработка, QA, аналитика, DevOps, дизайн)
+
+КОГДА ЗАДАВАТЬ ВОПРОСЫ:
+1. Если запрос слишком общий ("хочу работу", "ищу работу") — спроси сферу
+2. Если профессия размытая ("программист", "менеджер") — уточни специализацию
+3. Если не указан город и его нет в профиле — спроси город
+4. Задавай по ОДНОМУ вопросу за раз, не перегружай
+
+КОГДА СРАЗУ ИСКАТЬ:
+1. Если понятно что искать (конкретная профессия) И известен город — сразу ищи
+2. Если в профиле есть город, а пользователь назвал профессию — сразу ищи
+3. Если в резюме есть желаемая должность и город — можно предложить поискать
+
+КАК ФОРМИРОВАТЬ ПАРАМЕТРЫ search_vacancies:
+- query: преобразуй запрос пользователя в понятный поисковый запрос (см. примеры выше)
+- city: из сообщения или из профиля пользователя
+- salary_from: если пользователь указал или есть в "ТЕКУЩИЙ ПОИСК"
+- experience: если пользователь указал
+- employment_type: если пользователь указал (удалёнка → "remote", офис → "full")
+- exclude_keywords: если пользователь сказал что НЕ хочет (курьеры, продажи и т.д.)
+
+ПРАВИЛА ДИАЛОГА:
+1. Отвечай кратко и по делу
+2. Используй разговорный русский
+3. Если знаешь имя — обращайся по имени
+4. Не задавай все вопросы сразу — по одному
+
+ПРИМЕРЫ:
+
+Пользователь: "Хочу в ИИ"
+Ты: "В какой роли? ML engineer, Data Scientist, или prompt engineering?"
+
+Пользователь: "ML engineer в Москве"
+→ search_vacancies(query="Machine Learning OR ML engineer OR Data Science", city="Москва")
+
+Пользователь: "Ищу работу программистом" + в профиле город Казань
+Ты: "На каком языке? Python, JavaScript, Java?"
+
+Пользователь: "питон"
+→ search_vacancies(query="Python OR Django OR FastAPI", city="Казань")
+
+Пользователь: "Фронтенд удалённо"
+Ты: "В каком городе?"
+
+Пользователь: "СПб"
+→ search_vacancies(query="Frontend OR React OR Vue", city="Санкт-Петербург", employment_type="remote")
+
+Пользователь: "джава разработчик спб"
+→ search_vacancies(query="Java OR Spring OR Java developer", city="Санкт-Петербург")
 
 ФОРМАТ ОТВЕТА С ВАКАНСИЯМИ:
-Когда нашёл вакансии, кратко опиши что нашёл и предложи посмотреть карточки.
-Не перечисляй вакансии текстом — они будут показаны карточками.
-
-Пример: "Нашёл 15 вакансий менеджера в Москве от 80 000 ₽. Отфильтровал курьеров и холодные продажи. Смотри карточки справа 👉"
+Кратко опиши что нашёл. Вакансии покажутся карточками автоматически.
+Пример: "Нашёл 12 вакансий ML-инженера в Москве. Смотри карточки 👉"
 """
 
 
@@ -133,7 +178,7 @@ class Orchestrator:
         )
 
         # Обработка ответа
-        return await self._process_response(response, preferences)
+        return await self._process_response(response, preferences, user_data)
 
     def _convert_tool_to_openai(self, anthropic_tool: dict) -> dict:
         """Конвертация формата инструмента Anthropic в OpenAI"""
@@ -150,6 +195,7 @@ class Orchestrator:
         self,
         response: dict,
         preferences: UserPreferences,
+        user_data: Optional[UserData] = None,
     ) -> ChatResponse:
         """Обработка ответа от OpenRouter"""
         text_parts = []
@@ -170,7 +216,12 @@ class Orchestrator:
             if tool_call.get("function", {}).get("name") == "search_vacancies":
                 try:
                     args = json.loads(tool_call["function"]["arguments"])
-                    print(f"Search args: {args}")
+                    print(f"Search args from AI: {args}")
+
+                    # Дополняем параметры из preferences и user_data если ИИ их не указал
+                    args = self._merge_with_preferences(args, preferences, user_data)
+                    print(f"Search args after merge: {args}")
+
                     filters = SearchFilters(**args)
                     result = await vacancy_search.search(filters)
                     print(f"Search result: {len(result.vacancies)} vacancies found")
@@ -198,6 +249,61 @@ class Orchestrator:
             needs_clarification=len(vacancies) == 0 and not preferences.is_complete(),
             chat_id=str(hash(str(preferences))),
         )
+
+    def _merge_with_preferences(
+        self,
+        args: dict,
+        preferences: UserPreferences,
+        user_data: Optional[UserData] = None,
+    ) -> dict:
+        """Дополняет параметры поиска из preferences и user_data если ИИ их не указал"""
+
+        # query — приоритет: args > preferences > резюме (желаемая должность)
+        if not args.get("query"):
+            if preferences.query:
+                args["query"] = preferences.query
+            elif user_data and user_data.resume and user_data.resume.desired_position:
+                args["query"] = user_data.resume.desired_position
+
+        # city — приоритет: args > preferences > профиль (город)
+        if not args.get("city"):
+            if preferences.city:
+                args["city"] = preferences.city
+            elif user_data and user_data.profile and user_data.profile.city:
+                args["city"] = user_data.profile.city
+
+        # salary_from — приоритет: args > preferences > резюме (желаемая зарплата)
+        if not args.get("salary_from"):
+            if preferences.salary_from:
+                args["salary_from"] = preferences.salary_from
+            elif user_data and user_data.resume and user_data.resume.desired_salary:
+                # Пробуем извлечь число из строки зарплаты
+                try:
+                    salary_str = user_data.resume.desired_salary
+                    # Убираем пробелы и нечисловые символы, оставляем первое число
+                    numbers = re.findall(r'\d+', salary_str.replace(' ', ''))
+                    if numbers:
+                        args["salary_from"] = int(numbers[0])
+                except (ValueError, AttributeError):
+                    pass
+
+        # experience — берём из preferences если ИИ не указал
+        if not args.get("experience") and preferences.experience:
+            args["experience"] = preferences.experience
+
+        # employment_type — берём из preferences если ИИ не указал
+        if not args.get("employment_type") and preferences.employment_type:
+            args["employment_type"] = preferences.employment_type
+
+        # exclude_keywords — ОБЪЕДИНЯЕМ (важно не потерять)
+        ai_exclude = args.get("exclude_keywords", [])
+        pref_exclude = preferences.exclude_keywords or []
+        # Объединяем и убираем дубликаты
+        combined_exclude = list(set(ai_exclude + pref_exclude))
+        if combined_exclude:
+            args["exclude_keywords"] = combined_exclude
+
+        return args
 
     def _build_context(self, preferences: UserPreferences, user_data: Optional[UserData] = None) -> str:
         """Формирование контекста из предпочтений и данных пользователя"""
