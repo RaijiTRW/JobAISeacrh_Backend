@@ -211,8 +211,29 @@ class Orchestrator:
 
     async def extract_preferences(self, message: str, current: UserPreferences) -> UserPreferences:
         """Извлечение предпочтений из сообщения пользователя"""
-        extraction_prompt = f"""Извлеки информацию о поиске работы из сообщения пользователя.
-Верни ТОЛЬКО JSON без пояснений, с полями (только те что упомянуты):
+        current_prefs = []
+        if current.query:
+            current_prefs.append(f"- query: {current.query}")
+        if current.city:
+            current_prefs.append(f"- city: {current.city}")
+        if current.salary_from:
+            current_prefs.append(f"- salary_from: {current.salary_from}")
+        if current.experience:
+            current_prefs.append(f"- experience: {current.experience}")
+        if current.employment_type:
+            current_prefs.append(f"- employment_type: {current.employment_type}")
+        if current.exclude_keywords:
+            current_prefs.append(f"- exclude_keywords: {current.exclude_keywords}")
+
+        current_prefs_str = "\n".join(current_prefs) if current_prefs else "Пока ничего не известно"
+
+        extraction_prompt = f"""Извлеки НОВУЮ информацию о поиске работы из сообщения пользователя.
+НЕ повторяй уже известные данные, только добавляй новое.
+
+Уже известно:
+{current_prefs_str}
+
+Верни ТОЛЬКО JSON без пояснений, с полями (только те что НОВЫЕ в сообщении):
 - query: должность/сфера
 - city: город
 - salary_from: минимальная зарплата (число)
@@ -220,9 +241,9 @@ class Orchestrator:
 - employment_type: формат (full, part, remote)
 - exclude_keywords: что не предлагать (массив строк)
 
-Сообщение: {message}
+Новое сообщение: {message}
 
-JSON:"""
+JSON (только новые данные):"""
 
         try:
             response = await self.client.chat_completion(
@@ -255,6 +276,7 @@ JSON:"""
         except Exception as e:
             print(f"Error extracting preferences: {e}")
 
+        print(f"Current preferences: query={current.query}, city={current.city}, salary={current.salary_from}, exp={current.experience}")
         return current
 
 
