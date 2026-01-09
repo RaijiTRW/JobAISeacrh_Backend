@@ -8,6 +8,14 @@ from pydantic import BaseModel
 from typing import Optional
 import json
 import asyncio
+from datetime import datetime
+
+
+def json_serializer(obj):
+    """Сериализатор для datetime и других объектов"""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 from models.chat import ChatRequest, ChatResponse, UserPreferences
 from agents.orchestrator import orchestrator
@@ -133,7 +141,7 @@ async def send_message_stream(request: ChatMessageRequest):
 
         # Отправляем вакансии
         if response.vacancies:
-            yield f"data: {json.dumps({'type': 'vacancies', 'content': response.vacancies})}\n\n"
+            yield f"data: {json.dumps({'type': 'vacancies', 'content': response.vacancies}, default=json_serializer)}\n\n"
 
         # Завершение
         yield f"data: {json.dumps({'type': 'done', 'chat_id': response.chat_id})}\n\n"
