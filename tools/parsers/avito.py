@@ -5,6 +5,8 @@
 """
 
 import httpx
+import asyncio
+import random
 import re
 from typing import Optional
 from datetime import datetime
@@ -17,12 +19,23 @@ from models.vacancy import Vacancy, SearchFilters
 class AvitoParser(BaseParser):
     name = "avito"
     base_url = "https://www.avito.ru"
+    _last_request_time = 0  # Для rate limiting
 
     async def search(self, filters: SearchFilters, limit: int = 20) -> list[Vacancy]:
         """Поиск вакансий на Avito"""
         vacancies = []
 
         try:
+            # Rate limiting: ждём между запросами чтобы Avito не блокировал
+            import time
+            current_time = time.time()
+            time_since_last = current_time - AvitoParser._last_request_time
+            if time_since_last < 2.0:  # Минимум 2 секунды между запросами
+                wait_time = 2.0 - time_since_last + random.uniform(0.5, 1.5)
+                print(f"[Avito] Rate limit: waiting {wait_time:.1f}s")
+                await asyncio.sleep(wait_time)
+            AvitoParser._last_request_time = time.time()
+
             city_slug = self._get_city_slug(filters.city)
             url = f"{self.base_url}/{city_slug}/vakansii"
 
@@ -97,7 +110,9 @@ class AvitoParser(BaseParser):
                 elif response.status_code == 403:
                     print("[Avito] Access denied (403) - Avito blocked the request")
                 elif response.status_code == 429:
-                    print("[Avito] Rate limited (429) - too many requests")
+                    print("[Avito] Rate limited (429) - skipping this query")
+                    # Увеличиваем время ожидания для следующего запроса
+                    AvitoParser._last_request_time = time.time() + 5.0
                 else:
                     print(f"[Avito] Unexpected status: {response.status_code}")
 
