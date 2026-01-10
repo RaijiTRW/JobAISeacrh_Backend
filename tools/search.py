@@ -55,20 +55,13 @@ class VacancySearchTool:
         print(f"[Search] Running {len(parallel_tasks)} parallel tasks (HH + SuperJob)")
         parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
 
-        # Avito - АДАПТИВНЫЙ поиск: если первый запрос нашёл достаточно — не делаем лишних
-        # Это экономит запросы и снижает шанс 429 ошибки
-        avito_queries = queries[:3]  # Максимум 3 запроса
+        # Avito - выполняем ВСЕ запросы для максимального охвата
+        # Пагинация внутри парсера обеспечит достаточное количество
+        avito_queries = queries[:4]  # До 4 запросов для максимального охвата
         avito_results = []
-        avito_total_found = 0
-        min_target = 15  # Минимум вакансий для остановки
 
-        print(f"[Search] Running adaptive Avito search (up to {len(avito_queries)} queries)")
+        print(f"[Search] Running Avito search ({len(avito_queries)} queries)")
         for i, query in enumerate(avito_queries):
-            # Если уже нашли достаточно — не делаем лишних запросов
-            if avito_total_found >= min_target:
-                print(f"[Search] Avito: already found {avito_total_found}, skipping remaining queries")
-                break
-
             avito_filter = SearchFilters(
                 query=query,
                 city=filters.city,
@@ -81,8 +74,7 @@ class VacancySearchTool:
             try:
                 result = await avito_parser.search(avito_filter, limit=self.settings.max_vacancies_per_source)
                 avito_results.append(result)
-                avito_total_found += len(result)
-                print(f"[Search] Avito query {i+1}/{len(avito_queries)}: found {len(result)}, total: {avito_total_found}")
+                print(f"[Search] Avito query {i+1}/{len(avito_queries)}: found {len(result)}")
             except Exception as e:
                 print(f"[Search] Avito error: {e}")
                 avito_results.append([])
@@ -116,7 +108,7 @@ class VacancySearchTool:
         print(f"[Search] Found {len(all_vacancies)} total, {len(unique_vacancies)} unique")
 
         # Балансируем источники перед лимитом (чтобы Avito не терялся)
-        max_per_source = self.settings.max_total_vacancies // 3 + 5  # ~20 с каждого источника
+        max_per_source = self.settings.max_total_vacancies // 3 + 10  # ~35-40 с каждого источника
         by_source = {"hh": [], "avito": [], "superjob": []}
         for v in unique_vacancies:
             if v.source in by_source:

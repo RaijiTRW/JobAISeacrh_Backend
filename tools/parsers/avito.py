@@ -64,136 +64,162 @@ class AvitoParser(BaseParser):
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
     ]
 
-    async def search(self, filters: SearchFilters, limit: int = 20) -> list[Vacancy]:
-        """Поиск вакансий на Avito"""
+    async def search(self, filters: SearchFilters, limit: int = 50) -> list[Vacancy]:
+        """Поиск вакансий на Avito с пагинацией"""
         vacancies = []
+        settings = get_settings()
+        has_proxy = bool(settings.proxy_urls)
 
-        try:
-            # Rate limiting: ждём между запросами чтобы Avito не блокировал
-            import time
-            current_time = time.time()
-            time_since_last = current_time - AvitoParser._last_request_time
+        # Количество страниц для парсинга (больше с прокси)
+        max_pages = 3 if has_proxy else 2
+        items_per_page = 50  # Avito показывает ~50 на страницу
 
-            # Если есть прокси - минимальные задержки, иначе - длинные
-            settings = get_settings()
-            has_proxy = bool(settings.proxy_urls)
-            min_delay = 1.0 if has_proxy else 3.0
-            random_extra = random.uniform(0.5, 1.5) if has_proxy else random.uniform(1.0, 3.0)
+        city_slug = self._get_city_slug(filters.city)
+        base_url = f"{self.base_url}/{city_slug}/vakansii"
 
-            if time_since_last < min_delay:
-                wait_time = min_delay - time_since_last + random_extra
-                print(f"[Avito] Rate limit: waiting {wait_time:.1f}s")
-                await asyncio.sleep(wait_time)
+        for page in range(1, max_pages + 1):
+            # Если уже набрали достаточно — выходим
+            if len(vacancies) >= limit:
+                print(f"[Avito] Reached limit {limit}, stopping at page {page}")
+                break
 
-            AvitoParser._last_request_time = time.time()
-            AvitoParser._request_count += 1
-
-            city_slug = self._get_city_slug(filters.city)
-            url = f"{self.base_url}/{city_slug}/vakansii"
-
-            params = {}
-            if filters.query:
-                params["q"] = filters.query
-
-            # Фильтр зарплаты
-            if filters.salary_from:
-                params["pmin"] = filters.salary_from
-
-            # Ротация User-Agent
-            user_agent = self.USER_AGENTS[AvitoParser._request_count % len(self.USER_AGENTS)]
-            print(f"[Avito] Using User-Agent #{AvitoParser._request_count % len(self.USER_AGENTS)}")
-
-            # Варианты Accept-Language для разнообразия
-            accept_languages = [
-                "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                "ru,en-US;q=0.9,en;q=0.8",
-                "ru-RU,ru;q=0.9",
-            ]
-
-            # Реалистичные заголовки браузера с ротацией
-            headers = {
-                "User-Agent": user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": random.choice(accept_languages),
-                "Accept-Encoding": "gzip, deflate, br",
-                "DNT": str(random.randint(0, 1)),
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Cache-Control": random.choice(["max-age=0", "no-cache"]),
-            }
-
-            print(f"[Avito] Searching: {url} with params: {params}")
-
-            # Получаем прокси (если настроены)
-            proxy = self._get_proxy()
-            if proxy:
-                print(f"[Avito] Using proxy: {proxy[:20]}...")  # Показываем только начало для безопасности
-
-            async with httpx.AsyncClient(proxy=proxy) as client:
-                response = await client.get(
-                    url,
-                    params=params,
-                    headers=headers,
-                    timeout=20.0,
-                    follow_redirects=True,
+            try:
+                page_vacancies = await self._fetch_page(
+                    base_url, filters, page, has_proxy
                 )
 
-                print(f"[Avito] Response status: {response.status_code}")
+                if not page_vacancies:
+                    print(f"[Avito] Page {page} returned 0 results, stopping")
+                    break
 
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, "html.parser")
+                vacancies.extend(page_vacancies)
+                print(f"[Avito] Page {page}: found {len(page_vacancies)}, total: {len(vacancies)}")
 
-                    # Avito использует разные селекторы, пробуем несколько
-                    items = []
-
-                    # Основной селектор
-                    items = soup.select("[data-marker='item']")
-                    print(f"[Avito] Found {len(items)} items with [data-marker='item']")
-
-                    # Альтернативные селекторы
-                    if not items:
-                        items = soup.select("[class*='iva-item']")
-                        print(f"[Avito] Found {len(items)} items with [class*='iva-item']")
-
-                    if not items:
-                        items = soup.select("[itemtype*='JobPosting']")
-                        print(f"[Avito] Found {len(items)} items with itemtype JobPosting")
-
-                    if not items:
-                        # Ищем по структуре списка
-                        items = soup.select("div[class*='items-'] > div")
-                        print(f"[Avito] Found {len(items)} items in items container")
-
-                    items = items[:limit]
-
-                    for item in items:
-                        vacancy = self._parse_vacancy(item, filters.city or city_slug)
-                        if vacancy and self.matches_filters(vacancy, filters):
-                            vacancies.append(vacancy)
-
-                elif response.status_code == 403:
-                    print("[Avito] Access denied (403) - Avito blocked the request")
-                elif response.status_code == 429:
-                    print("[Avito] Rate limited (429) - backing off")
-                    # Увеличиваем время ожидания для следующего запроса (10-15 секунд)
-                    backoff_time = random.uniform(10.0, 15.0)
-                    AvitoParser._last_request_time = time.time() + backoff_time
-                    print(f"[Avito] Next request delayed by {backoff_time:.1f}s")
-                else:
-                    print(f"[Avito] Unexpected status: {response.status_code}")
-
-        except httpx.TimeoutException:
-            print("[Avito] Request timeout")
-        except Exception as e:
-            print(f"[Avito] Parser error: {e}")
-            import traceback
-            traceback.print_exc()
+            except Exception as e:
+                print(f"[Avito] Error on page {page}: {e}")
+                break
 
         print(f"[Avito] Total vacancies found: {len(vacancies)}")
+        return vacancies[:limit]
+
+    async def _fetch_page(
+        self, base_url: str, filters: SearchFilters, page: int, has_proxy: bool
+    ) -> list[Vacancy]:
+        """Загрузка одной страницы результатов"""
+        import time
+
+        # Rate limiting
+        current_time = time.time()
+        time_since_last = current_time - AvitoParser._last_request_time
+        min_delay = 1.0 if has_proxy else 3.0
+        random_extra = random.uniform(0.5, 1.5) if has_proxy else random.uniform(1.0, 3.0)
+
+        if time_since_last < min_delay:
+            wait_time = min_delay - time_since_last + random_extra
+            print(f"[Avito] Rate limit: waiting {wait_time:.1f}s")
+            await asyncio.sleep(wait_time)
+
+        AvitoParser._last_request_time = time.time()
+        AvitoParser._request_count += 1
+
+        # Параметры запроса
+        params = {}
+        if filters.query:
+            params["q"] = filters.query
+        if page > 1:
+            params["p"] = page
+        if filters.salary_from:
+            params["pmin"] = filters.salary_from
+        # Сортировка по дате — свежие вакансии первыми
+        params["s"] = 104  # 104 = по дате
+
+        # Ротация User-Agent
+        user_agent = self.USER_AGENTS[AvitoParser._request_count % len(self.USER_AGENTS)]
+        print(f"[Avito] Page {page}, User-Agent #{AvitoParser._request_count % len(self.USER_AGENTS)}")
+
+        # Варианты Accept-Language для разнообразия
+        accept_languages = [
+            "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "ru,en-US;q=0.9,en;q=0.8",
+            "ru-RU,ru;q=0.9",
+        ]
+
+        # Реалистичные заголовки браузера с ротацией
+        headers = {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": random.choice(accept_languages),
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": str(random.randint(0, 1)),
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": random.choice(["max-age=0", "no-cache"]),
+        }
+
+        print(f"[Avito] Searching: {base_url} with params: {params}")
+
+        # Получаем прокси (если настроены)
+        proxy = self._get_proxy()
+        if proxy:
+            print(f"[Avito] Using proxy: {proxy[:20]}...")
+
+        vacancies = []
+        async with httpx.AsyncClient(proxy=proxy) as client:
+            response = await client.get(
+                base_url,
+                params=params,
+                headers=headers,
+                timeout=20.0,
+                follow_redirects=True,
+            )
+
+            print(f"[Avito] Response status: {response.status_code}")
+
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
+
+                # Avito использует разные селекторы, пробуем несколько
+                items = []
+
+                # Основной селектор
+                items = soup.select("[data-marker='item']")
+                print(f"[Avito] Found {len(items)} items with [data-marker='item']")
+
+                # Альтернативные селекторы
+                if not items:
+                    items = soup.select("[class*='iva-item']")
+                    print(f"[Avito] Found {len(items)} items with [class*='iva-item']")
+
+                if not items:
+                    items = soup.select("[itemtype*='JobPosting']")
+                    print(f"[Avito] Found {len(items)} items with itemtype JobPosting")
+
+                if not items:
+                    # Ищем по структуре списка
+                    items = soup.select("div[class*='items-'] > div")
+                    print(f"[Avito] Found {len(items)} items in items container")
+
+                city_slug = self._get_city_slug(filters.city)
+                for item in items:
+                    vacancy = self._parse_vacancy(item, filters.city or city_slug)
+                    if vacancy and self.matches_filters(vacancy, filters):
+                        vacancies.append(vacancy)
+
+            elif response.status_code == 403:
+                print("[Avito] Access denied (403) - Avito blocked the request")
+            elif response.status_code == 429:
+                print("[Avito] Rate limited (429) - backing off")
+                backoff_time = random.uniform(10.0, 15.0)
+                AvitoParser._last_request_time = time.time() + backoff_time
+                print(f"[Avito] Next request delayed by {backoff_time:.1f}s")
+                raise Exception("Rate limited")
+            else:
+                print(f"[Avito] Unexpected status: {response.status_code}")
+
         return vacancies
 
     def _get_city_slug(self, city: str) -> str:
