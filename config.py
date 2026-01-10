@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     # AI Settings
     model_name: str = "anthropic/claude-sonnet-4"
+    validator_model_name: str = "anthropic/claude-3-haiku"  # Быстрая модель для валидации
     max_tokens: int = 4096
 
     # Search settings
