@@ -115,14 +115,35 @@ class VacancySearchTool:
 
         print(f"[Search] Found {len(all_vacancies)} total, {len(unique_vacancies)} unique")
 
-        # Сортируем по зарплате (сначала с указанной)
-        unique_vacancies.sort(
+        # Балансируем источники перед лимитом (чтобы Avito не терялся)
+        max_per_source = self.settings.max_total_vacancies // 3 + 5  # ~20 с каждого источника
+        by_source = {"hh": [], "avito": [], "superjob": []}
+        for v in unique_vacancies:
+            if v.source in by_source:
+                by_source[v.source].append(v)
+
+        # Сортируем каждый источник по зарплате
+        for source in by_source:
+            by_source[source].sort(
+                key=lambda x: (x.salary_from or 0, x.salary_to or 0),
+                reverse=True
+            )
+
+        # Берём до max_per_source из каждого источника
+        balanced = []
+        for source, vacancies in by_source.items():
+            taken = vacancies[:max_per_source]
+            balanced.extend(taken)
+            print(f"[Search] Source {source}: {len(vacancies)} total, took {len(taken)}")
+
+        # Финальная сортировка по зарплате
+        balanced.sort(
             key=lambda x: (x.salary_from or 0, x.salary_to or 0),
             reverse=True
         )
 
         # Ограничиваем количество
-        limited = unique_vacancies[:self.settings.max_total_vacancies]
+        limited = balanced[:self.settings.max_total_vacancies]
 
         return SearchResult(
             vacancies=limited,
