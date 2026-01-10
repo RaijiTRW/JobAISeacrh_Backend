@@ -292,11 +292,59 @@ class Orchestrator:
                     )
                     print(f"Validated: {len(validation_result.validated)} vacancies, rejected: {len(validation_result.rejected)}")
 
-                    vacancies = [v.model_dump(mode='json') for v in validation_result.validated]
-                    rejected_vacancies = [v.model_dump(mode='json') for v in validation_result.rejected]
+                    all_validated = list(validation_result.validated)
+                    all_rejected = list(validation_result.rejected)
+
+                    # === FEEDBACK LOOP ===
+                    # Если мало результатов и есть suggested_keywords — пробуем ещё раз
+                    if (len(all_validated) < 5 and validation_result.suggested_keywords):
+                        print(f"[Feedback Loop] Only {len(all_validated)} validated, trying with suggested: {validation_result.suggested_keywords}")
+
+                        # Добавляем suggested keywords к запросам
+                        new_queries = list(set(filters.queries + validation_result.suggested_keywords))[:8]
+                        new_filters = SearchFilters(
+                            queries=new_queries,
+                            city=filters.city,
+                            salary_from=filters.salary_from,
+                            salary_to=filters.salary_to,
+                            experience=filters.experience,
+                            employment_type=filters.employment_type,
+                            exclude_keywords=filters.exclude_keywords,
+                        )
+
+                        # Второй поиск
+                        result2 = await vacancy_search.search(new_filters)
+                        print(f"[Feedback Loop] Second search: {len(result2.vacancies)} vacancies")
+
+                        if result2.vacancies:
+                            # Валидируем новые
+                            validation2 = await self.validator.validate_batch(
+                                result2.vacancies,
+                                preferences,
+                                queries=new_queries,
+                            )
+                            print(f"[Feedback Loop] Second validation: {len(validation2.validated)} validated")
+
+                            # Добавляем уникальные
+                            seen_ids = {v.id for v in all_validated}
+                            for v in validation2.validated:
+                                if v.id not in seen_ids:
+                                    all_validated.append(v)
+                                    seen_ids.add(v.id)
+
+                            # Добавляем rejected
+                            seen_rejected = {v.id for v in all_rejected}
+                            for v in validation2.rejected:
+                                if v.id not in seen_rejected:
+                                    all_rejected.append(v)
+
+                            print(f"[Feedback Loop] Total after loop: {len(all_validated)} validated")
+
+                    vacancies = [v.model_dump(mode='json') for v in all_validated]
+                    rejected_vacancies = [v.model_dump(mode='json') for v in all_rejected]
 
                     text_parts.append(
-                        f"\n\nНашёл {len(validation_result.validated)} подходящих вакансий из {result.total_found} найденных."
+                        f"\n\nНашёл {len(all_validated)} подходящих вакансий из {result.total_found} найденных."
                     )
                 except Exception as e:
                     print(f"Error processing tool call: {e}")

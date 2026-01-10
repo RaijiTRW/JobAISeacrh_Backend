@@ -95,7 +95,6 @@ class VacancySearchTool:
         seen_keys = set()
         unique_vacancies = []
         for v in all_vacancies:
-            # Проверяем и по ID, и по ключу (title+company+city)
             if v.id in seen_ids:
                 continue
             key = f"{v.title.lower()}_{v.company.lower()}_{v.city.lower()}"
@@ -105,10 +104,14 @@ class VacancySearchTool:
             seen_keys.add(key)
             unique_vacancies.append(v)
 
-        print(f"[Search] Found {len(all_vacancies)} total, {len(unique_vacancies)} unique")
+        print(f"[Search] Found {len(all_vacancies)} total, {len(unique_vacancies)} after ID dedupe")
 
-        # Балансируем источники перед лимитом (чтобы Avito не терялся)
-        max_per_source = self.settings.max_total_vacancies // 3 + 10  # ~35-40 с каждого источника
+        # Семантическая дедупликация — группируем похожие названия
+        unique_vacancies = self._semantic_dedupe(unique_vacancies)
+        print(f"[Search] After semantic dedupe: {len(unique_vacancies)} unique")
+
+        # Балансируем источники — берём всё что нашли
+        max_per_source = self.settings.max_total_vacancies // 3 + 20  # ~85 с каждого источника
         by_source = {"hh": [], "avito": [], "superjob": []}
         for v in unique_vacancies:
             if v.source in by_source:
@@ -142,6 +145,81 @@ class VacancySearchTool:
             total_found=len(unique_vacancies),
             filters_applied=filters,
         )
+
+    def _semantic_dedupe(self, vacancies: list[Vacancy]) -> list[Vacancy]:
+        """
+        Семантическая дедупликация — группируем похожие вакансии.
+        "Оператор ПВЗ" ≈ "Менеджер пункта выдачи" ≈ "Сотрудник ПВЗ"
+        Оставляем лучшую из группы (выше зарплата, лучше описание).
+        """
+        if len(vacancies) <= 1:
+            return vacancies
+
+        # Нормализация названия для сравнения
+        def normalize(title: str) -> str:
+            t = title.lower().strip()
+            # Убираем стоп-слова которые не влияют на смысл
+            for word in ["требуется", "нужен", "нужна", "ищем", "вакансия", "работа"]:
+                t = t.replace(word, "")
+            return t.strip()
+
+        # Синонимы для группировки
+        synonyms = {
+            "пвз": ["пункт выдачи", "выдача заказов", "пункт выдачи заказов"],
+            "менеджер": ["оператор", "сотрудник", "администратор", "специалист"],
+            "разработчик": ["developer", "программист", "инженер"],
+            "frontend": ["фронтенд", "front-end", "фронт"],
+            "backend": ["бэкенд", "back-end", "бэк"],
+        }
+
+        def get_base_key(title: str) -> str:
+            """Получить базовый ключ для группировки"""
+            t = normalize(title)
+
+            # Заменяем синонимы на базовую форму
+            for base, syns in synonyms.items():
+                for syn in syns:
+                    if syn in t:
+                        t = t.replace(syn, base)
+                if base in t:
+                    pass  # уже есть
+
+            # Извлекаем ключевые слова (первые 3 значимых слова)
+            words = [w for w in t.split() if len(w) > 2][:3]
+            return " ".join(sorted(words))
+
+        # Группируем по базовому ключу + город
+        groups: dict[str, list[Vacancy]] = {}
+        for v in vacancies:
+            key = f"{get_base_key(v.title)}_{v.city.lower()}"
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(v)
+
+        # Из каждой группы берём лучшую вакансию
+        result = []
+        for key, group in groups.items():
+            if len(group) == 1:
+                result.append(group[0])
+            else:
+                # Сортируем: выше зарплата, длиннее описание, hh > avito > superjob
+                source_priority = {"hh": 3, "avito": 2, "superjob": 1}
+                group.sort(
+                    key=lambda x: (
+                        x.salary_from or 0,
+                        x.salary_to or 0,
+                        len(x.description or ""),
+                        source_priority.get(x.source, 0),
+                    ),
+                    reverse=True
+                )
+                best = group[0]
+                result.append(best)
+
+                if len(group) > 1:
+                    print(f"[Search] Dedupe group '{key[:30]}': {len(group)} → 1 (kept: {best.title[:40]})")
+
+        return result
 
     def get_tool_definition(self) -> dict:
         """

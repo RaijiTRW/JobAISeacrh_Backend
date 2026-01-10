@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     max_tokens: int = 4096
 
     # Search settings
-    max_vacancies_per_source: int = 40  # Больше с каждого источника
-    max_total_vacancies: int = 80  # Больше общий лимит для максимального охвата
+    max_vacancies_per_source: int = 100  # Без жёстких лимитов
+    max_total_vacancies: int = 200  # Показываем всё что нашли
 
     # Proxy settings (для обхода rate limiting на Avito)
     # Формат: http://user:pass@host:port или http://host:port

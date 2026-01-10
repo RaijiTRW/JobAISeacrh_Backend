@@ -1,13 +1,22 @@
 """
 Валидатор вакансий
-AI-фильтрация с пониманием контекста
+AI-фильтрация с confidence scoring и feedback loop
 """
 
 import httpx
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from models.vacancy import Vacancy
 from models.chat import UserPreferences
 from config import get_settings
+
+
+@dataclass
+class VacancyScore:
+    """Оценка одной вакансии"""
+    vacancy: Vacancy
+    confidence: float  # 0.0 - 1.0
+    reason: str  # Почему подходит/не подходит
 
 
 @dataclass
@@ -15,10 +24,11 @@ class ValidationResult:
     """Результат валидации вакансий"""
     validated: list[Vacancy]
     rejected: list[Vacancy]
+    suggested_keywords: list[str] = field(default_factory=list)  # Для feedback loop
 
 
 class VacancyValidator:
-    """AI-валидатор — сам читает и понимает каждую вакансию"""
+    """AI-валидатор с confidence scoring"""
 
     def __init__(self):
         self.settings = get_settings()
@@ -29,9 +39,9 @@ class VacancyValidator:
         preferences: UserPreferences,
         queries: list[str] = None,
     ) -> ValidationResult:
-        """AI сам решает какие вакансии подходят"""
+        """AI валидация с confidence scoring"""
         if not vacancies:
-            return ValidationResult(validated=[], rejected=[])
+            return ValidationResult(validated=[], rejected=[], suggested_keywords=[])
 
         queries = queries or []
         queries_text = " ".join(queries).lower()
@@ -39,17 +49,16 @@ class VacancyValidator:
         print(f"[Validator] Input: {len(vacancies)} vacancies")
         print(f"[Validator] User query: {queries_text}")
 
-        # Пользовательские исключения (только если пользователь сам попросил)
+        # Пользовательские исключения
         user_exclusions = [w.lower().strip() for w in preferences.exclude_keywords if w]
 
-        # Фильтруем только по явным исключениям пользователя
+        # Pre-фильтр: только явные исключения пользователя
         to_validate = []
         user_rejected = []
 
         for vacancy in vacancies:
-            # Проверяем только пользовательские исключения
             if user_exclusions:
-                full_text = f"{(vacancy.title or '').lower()} {(vacancy.description or '').lower()} {(vacancy.company or '').lower()}"
+                full_text = f"{(vacancy.title or '').lower()} {(vacancy.description or '').lower()}"
                 excluded = False
                 for excl in user_exclusions:
                     if excl in full_text:
@@ -60,7 +69,7 @@ class VacancyValidator:
                     user_rejected.append(vacancy)
                     continue
 
-            # Проверка зарплаты (если пользователь указал минимум)
+            # Проверка зарплаты
             if preferences.salary_from:
                 if vacancy.salary_to and vacancy.salary_to < preferences.salary_from:
                     user_rejected.append(vacancy)
@@ -68,74 +77,95 @@ class VacancyValidator:
 
             to_validate.append(vacancy)
 
-        print(f"[Validator] After user filters: {len(to_validate)} to AI, {len(user_rejected)} rejected by user prefs")
+        print(f"[Validator] After user filters: {len(to_validate)} to AI, {len(user_rejected)} rejected")
 
         if not to_validate:
-            return ValidationResult(validated=[], rejected=user_rejected)
+            return ValidationResult(validated=[], rejected=user_rejected, suggested_keywords=[])
 
-        # AI сам решает для каждой вакансии
-        ai_result = await self._ai_validate(to_validate, queries_text)
+        # AI валидация с confidence
+        ai_result = await self._ai_validate_with_confidence(to_validate, queries_text)
 
         # Объединяем rejected
         all_rejected = user_rejected + ai_result.rejected
 
         print(f"[Validator] Final: {len(ai_result.validated)} validated, {len(all_rejected)} rejected")
-        return ValidationResult(validated=ai_result.validated, rejected=all_rejected)
+        print(f"[Validator] Suggested keywords: {ai_result.suggested_keywords}")
 
-    async def _ai_validate(self, vacancies: list[Vacancy], user_query: str) -> ValidationResult:
-        """AI читает каждую вакансию и решает подходит ли она"""
+        return ValidationResult(
+            validated=ai_result.validated,
+            rejected=all_rejected,
+            suggested_keywords=ai_result.suggested_keywords
+        )
+
+    async def _ai_validate_with_confidence(
+        self, vacancies: list[Vacancy], user_query: str
+    ) -> ValidationResult:
+        """AI оценивает каждую вакансию с confidence score"""
         validated = []
         rejected = []
-        batch_size = 20  # Больше за раз - меньше запросов
+        suggested_keywords = []
+        batch_size = 15  # Меньше батч для лучшего качества
 
         for i in range(0, len(vacancies), batch_size):
             batch = vacancies[i:i + batch_size]
-            approved_ids = await self._ask_ai(batch, user_query)
+            scores, keywords = await self._ask_ai_confidence(batch, user_query)
+
+            suggested_keywords.extend(keywords)
 
             for vacancy in batch:
-                if vacancy.id in approved_ids:
-                    print(f"[Validator] AI YES: '{vacancy.title}'")
+                score = scores.get(vacancy.id)
+                if score and score["confidence"] >= 0.5:
+                    print(f"[Validator] YES ({score['confidence']:.1f}): '{vacancy.title}' - {score['reason']}")
                     validated.append(vacancy)
                 else:
-                    print(f"[Validator] AI NO: '{vacancy.title}'")
+                    reason = score["reason"] if score else "не оценено"
+                    conf = score["confidence"] if score else 0
+                    print(f"[Validator] NO ({conf:.1f}): '{vacancy.title}' - {reason}")
                     rejected.append(vacancy)
 
-        return ValidationResult(validated=validated, rejected=rejected)
+        # Убираем дубликаты из keywords
+        unique_keywords = list(set(suggested_keywords))[:10]
 
-    async def _ask_ai(self, vacancies: list[Vacancy], user_query: str) -> set[str]:
-        """Спрашиваем AI какие вакансии подходят под запрос пользователя"""
+        return ValidationResult(
+            validated=validated,
+            rejected=rejected,
+            suggested_keywords=unique_keywords
+        )
 
-        # Формируем список вакансий
+    async def _ask_ai_confidence(
+        self, vacancies: list[Vacancy], user_query: str
+    ) -> tuple[dict, list[str]]:
+        """AI возвращает confidence score для каждой вакансии"""
+
         vacancy_list = []
-        for i, v in enumerate(vacancies):
-            desc = (v.description[:300] if v.description else 'нет описания').replace('\n', ' ')
-            vacancy_list.append(f"{i+1}. ID={v.id} | {v.title} | {v.company} | {desc}")
+        for v in vacancies:
+            desc = (v.description[:200] if v.description else '').replace('\n', ' ')
+            vacancy_list.append(f"ID: {v.id}\nНазвание: {v.title}\nКомпания: {v.company}\nОписание: {desc}\n")
 
-        prompt = f"""Ты помогаешь человеку найти работу. Он ищет: "{user_query}"
+        prompt = f"""Человек ищет работу: "{user_query}"
 
-Твоя задача простая: посмотри на каждую вакансию и скажи — это то что он ищет или нет?
+Оцени каждую вакансию — насколько она подходит под запрос.
 
-Думай как человек:
-- Если человек ищет "ПВЗ" или "пункт выдачи" — ему нужны вакансии в пунктах выдачи заказов (Wildberries, Ozon, СДЭК и т.д.)
-- Если ищет "программист Python" — подойдут Python developer, Django, FastAPI, backend разработчик
-- Если ищет "менеджер" — подойдут разные виды менеджеров в зависимости от контекста
+ПРАВИЛА:
+1. Смотри на СУТЬ, не на точное совпадение слов
+2. "ПВЗ" = "пункт выдачи" = "выдача заказов" = "Wildberries/Ozon пункт"
+3. Если вакансия МОЖЕТ подойти — ставь confidence >= 0.5
+4. Отсеивай только явно НЕ ТО (курьер когда ищут ПВЗ, продавец когда ищут программиста)
 
-НЕ отсеивай если:
-- Название чуть другое но суть та же (например "оператор ПВЗ" = "менеджер пункта выдачи")
-- В описании упоминается то что ищет пользователь
-- Компания связана с тем что ищет пользователь
-
-Отсеивай ТОЛЬКО если вакансия ВООБЩЕ не про то:
-- Ищет ПВЗ, а вакансия про курьера/водителя/грузчика
-- Ищет программиста, а вакансия про продавца
-
-Вакансии:
+ВАКАНСИИ:
 {chr(10).join(vacancy_list)}
 
-Верни JSON массив с ID вакансий которые ПОДХОДЯТ:
-["id1", "id2", ...]
+Ответь СТРОГО в JSON формате:
+{{
+  "scores": [
+    {{"id": "vacancy_id", "confidence": 0.9, "reason": "точное совпадение"}},
+    {{"id": "vacancy_id2", "confidence": 0.3, "reason": "это курьер, не ПВЗ"}}
+  ],
+  "suggested_keywords": ["ключевое слово 1", "ключевое слово 2"]
+}}
 
-Если сомневаешься — лучше включи. Пользователь сам разберётся."""
+suggested_keywords — слова из ПОДХОДЯЩИХ вакансий, которые можно использовать для расширения поиска.
+Например если нашёл "оператор склада WB" — добавь "оператор склада", "WB"."""
 
         try:
             async with httpx.AsyncClient() as client:
@@ -148,8 +178,8 @@ class VacancyValidator:
                     json={
                         "model": self.settings.validator_model_name,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 1000,
-                        "temperature": 0.1,  # Немного вариативности для лояльности
+                        "max_tokens": 2000,
+                        "temperature": 0.1,
                     },
                     timeout=60.0,
                 )
@@ -159,25 +189,39 @@ class VacancyValidator:
                     raise Exception(f"AI validator error: {response.status_code}")
 
                 data = response.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
-                print(f"[Validator] AI response: {content[:200]}...")
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                print(f"[Validator] AI response: {content[:300]}...")
 
                 # Парсим JSON
-                import json
                 try:
-                    start = content.find("[")
-                    end = content.rfind("]") + 1
+                    # Ищем JSON в ответе
+                    start = content.find("{")
+                    end = content.rfind("}") + 1
                     if start >= 0 and end > start:
                         json_str = content[start:end]
-                        approved_ids = json.loads(json_str)
-                        return set(approved_ids)
+                        result = json.loads(json_str)
+
+                        scores = {}
+                        for item in result.get("scores", []):
+                            scores[item["id"]] = {
+                                "confidence": float(item.get("confidence", 0.5)),
+                                "reason": item.get("reason", "")
+                            }
+
+                        keywords = result.get("suggested_keywords", [])
+                        return scores, keywords
+
                 except json.JSONDecodeError as e:
-                    print(f"[Validator] JSON parse error: {content}")
-                    raise Exception(f"AI response parse error: {e}")
+                    print(f"[Validator] JSON parse error: {e}")
+                    # Fallback: одобряем всё
+                    scores = {v.id: {"confidence": 0.6, "reason": "fallback"} for v in vacancies}
+                    return scores, []
 
         except Exception as e:
             print(f"[Validator] Error: {e}")
             raise
+
+        return {}, []
 
 
 # Singleton

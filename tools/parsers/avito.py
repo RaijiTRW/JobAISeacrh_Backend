@@ -1,17 +1,15 @@
 """
 Парсер вакансий с Avito
-Использует веб-скрапинг (Avito не имеет публичного API)
-ВАЖНО: Avito активно защищается от скрапинга, парсер может работать нестабильно
+Smart retry с ротацией сортировки и exponential backoff
 """
 
 import httpx
 import asyncio
 import random
 import re
+import time
 from typing import Optional
-from datetime import datetime
 from bs4 import BeautifulSoup
-from urllib.parse import quote
 from tools.parsers import BaseParser
 from models.vacancy import Vacancy, SearchFilters
 from config import get_settings
@@ -20,109 +18,132 @@ from config import get_settings
 class AvitoParser(BaseParser):
     name = "avito"
     base_url = "https://www.avito.ru"
-    _last_request_time = 0  # Для rate limiting
-    _request_count = 0  # Счётчик запросов для ротации
-    _proxy_list: list[str] = []  # Список прокси для ротации
-    _proxy_index = 0  # Текущий индекс прокси
+    _last_request_time = 0
+    _request_count = 0
+    _retry_count = 0  # Для exponential backoff
+    _proxy_list: list[str] = []
+    _proxy_index = 0
+
+    # Варианты сортировки для retry
+    SORT_OPTIONS = [
+        104,  # По дате
+        1,    # По умолчанию
+        2,    # По цене ↑
+        3,    # По цене ↓
+    ]
+
+    USER_AGENTS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+    ]
 
     @classmethod
     def _get_proxy(cls) -> Optional[str]:
-        """Получить следующий прокси из списка (ротация)"""
+        """Ротация прокси"""
         settings = get_settings()
         if not settings.proxy_urls:
             return None
-
-        # Инициализируем список прокси при первом вызове
         if not cls._proxy_list:
             cls._proxy_list = [p.strip() for p in settings.proxy_urls.split(",") if p.strip()]
-
         if not cls._proxy_list:
             return None
-
-        # Ротация прокси
         proxy = cls._proxy_list[cls._proxy_index % len(cls._proxy_list)]
         cls._proxy_index += 1
         return proxy
 
-    # Пул User-Agent'ов для ротации
-    USER_AGENTS = [
-        # Chrome Windows
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        # Chrome Mac
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        # Firefox Windows
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-        # Firefox Mac
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
-        # Safari Mac
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-        # Edge
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
-    ]
-
-    async def search(self, filters: SearchFilters, limit: int = 50) -> list[Vacancy]:
-        """Поиск вакансий на Avito с пагинацией"""
+    async def search(self, filters: SearchFilters, limit: int = 100) -> list[Vacancy]:
+        """Поиск с smart retry"""
         vacancies = []
         settings = get_settings()
         has_proxy = bool(settings.proxy_urls)
 
-        # Количество страниц для парсинга (больше с прокси)
-        max_pages = 3 if has_proxy else 2
-        items_per_page = 50  # Avito показывает ~50 на страницу
-
         city_slug = self._get_city_slug(filters.city)
         base_url = f"{self.base_url}/{city_slug}/vakansii"
 
-        for page in range(1, max_pages + 1):
-            # Если уже набрали достаточно — выходим
+        # Пробуем разные сортировки если 0 результатов
+        for sort_idx, sort_option in enumerate(self.SORT_OPTIONS):
             if len(vacancies) >= limit:
-                print(f"[Avito] Reached limit {limit}, stopping at page {page}")
                 break
 
-            try:
-                page_vacancies = await self._fetch_page(
-                    base_url, filters, page, has_proxy
-                )
+            page_vacancies = await self._fetch_with_retry(
+                base_url, filters, sort_option, has_proxy
+            )
 
-                if not page_vacancies:
-                    print(f"[Avito] Page {page} returned 0 results, stopping")
+            if page_vacancies:
+                # Добавляем только уникальные
+                seen_ids = {v.id for v in vacancies}
+                for v in page_vacancies:
+                    if v.id not in seen_ids:
+                        vacancies.append(v)
+                        seen_ids.add(v.id)
+
+                print(f"[Avito] Sort {sort_option}: +{len(page_vacancies)}, total unique: {len(vacancies)}")
+
+                # Если нашли достаточно — не пробуем другие сортировки
+                if len(vacancies) >= 30:
                     break
-
-                vacancies.extend(page_vacancies)
-                print(f"[Avito] Page {page}: found {len(page_vacancies)}, total: {len(vacancies)}")
-
-            except Exception as e:
-                print(f"[Avito] Error on page {page}: {e}")
-                break
+            else:
+                print(f"[Avito] Sort {sort_option}: 0 results, trying next sort...")
 
         print(f"[Avito] Total vacancies found: {len(vacancies)}")
         return vacancies[:limit]
 
-    async def _fetch_page(
-        self, base_url: str, filters: SearchFilters, page: int, has_proxy: bool
+    async def _fetch_with_retry(
+        self, base_url: str, filters: SearchFilters, sort_option: int, has_proxy: bool
     ) -> list[Vacancy]:
-        """Загрузка одной страницы результатов"""
-        import time
+        """Fetch с retry при ошибках"""
+        max_retries = 3
+        vacancies = []
 
+        for retry in range(max_retries):
+            try:
+                result = await self._fetch_page(base_url, filters, 1, sort_option, has_proxy)
+                if result:
+                    vacancies.extend(result)
+
+                    # Пробуем вторую страницу если есть результаты
+                    if len(result) >= 20:
+                        await asyncio.sleep(random.uniform(1.5, 3.0))
+                        page2 = await self._fetch_page(base_url, filters, 2, sort_option, has_proxy)
+                        if page2:
+                            vacancies.extend(page2)
+
+                    AvitoParser._retry_count = 0  # Сбрасываем счётчик
+                    return vacancies
+
+                # 0 результатов — не ошибка, просто нет данных
+                return []
+
+            except Exception as e:
+                AvitoParser._retry_count += 1
+                backoff = min(10.0 * (2 ** retry), 60.0)  # Exponential: 10s, 20s, 40s, max 60s
+                print(f"[Avito] Retry {retry + 1}/{max_retries}, backoff {backoff:.1f}s: {e}")
+                await asyncio.sleep(backoff)
+
+        return vacancies
+
+    async def _fetch_page(
+        self, base_url: str, filters: SearchFilters, page: int, sort_option: int, has_proxy: bool
+    ) -> list[Vacancy]:
+        """Загрузка одной страницы"""
         # Rate limiting
         current_time = time.time()
         time_since_last = current_time - AvitoParser._last_request_time
-        min_delay = 1.0 if has_proxy else 3.0
-        random_extra = random.uniform(0.5, 1.5) if has_proxy else random.uniform(1.0, 3.0)
+        min_delay = 1.5 if has_proxy else 3.5
 
         if time_since_last < min_delay:
-            wait_time = min_delay - time_since_last + random_extra
-            print(f"[Avito] Rate limit: waiting {wait_time:.1f}s")
+            wait_time = min_delay - time_since_last + random.uniform(0.5, 1.5)
             await asyncio.sleep(wait_time)
 
         AvitoParser._last_request_time = time.time()
         AvitoParser._request_count += 1
 
-        # Параметры запроса
+        # Параметры
         params = {}
         if filters.query:
             params["q"] = filters.query
@@ -130,78 +151,46 @@ class AvitoParser(BaseParser):
             params["p"] = page
         if filters.salary_from:
             params["pmin"] = filters.salary_from
-        # Сортировка по дате — свежие вакансии первыми
-        params["s"] = 104  # 104 = по дате
+        if sort_option:
+            params["s"] = sort_option
 
-        # Ротация User-Agent
+        # Headers с ротацией
         user_agent = self.USER_AGENTS[AvitoParser._request_count % len(self.USER_AGENTS)]
-        print(f"[Avito] Page {page}, User-Agent #{AvitoParser._request_count % len(self.USER_AGENTS)}")
-
-        # Варианты Accept-Language для разнообразия
-        accept_languages = [
-            "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-            "ru,en-US;q=0.9,en;q=0.8",
-            "ru-RU,ru;q=0.9",
-        ]
-
-        # Реалистичные заголовки браузера с ротацией
         headers = {
             "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": random.choice(accept_languages),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": random.choice([
+                "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "ru,en-US;q=0.9,en;q=0.8",
+                "ru-RU,ru;q=0.9",
+            ]),
             "Accept-Encoding": "gzip, deflate, br",
-            "DNT": str(random.randint(0, 1)),
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
             "Sec-Fetch-Dest": "document",
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": random.choice(["max-age=0", "no-cache"]),
+            "Cache-Control": "max-age=0",
         }
 
-        print(f"[Avito] Searching: {base_url} with params: {params}")
+        print(f"[Avito] Fetching page {page}, sort={sort_option}, query='{filters.query}'")
 
-        # Получаем прокси (если настроены)
         proxy = self._get_proxy()
-        if proxy:
-            print(f"[Avito] Using proxy: {proxy[:20]}...")
-
         vacancies = []
-        async with httpx.AsyncClient(proxy=proxy) as client:
+
+        async with httpx.AsyncClient(proxy=proxy, timeout=25.0) as client:
             response = await client.get(
                 base_url,
                 params=params,
                 headers=headers,
-                timeout=20.0,
                 follow_redirects=True,
             )
 
-            print(f"[Avito] Response status: {response.status_code}")
+            print(f"[Avito] Status: {response.status_code}")
 
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
-
-                # Avito использует разные селекторы, пробуем несколько
-                items = []
-
-                # Основной селектор
-                items = soup.select("[data-marker='item']")
-                print(f"[Avito] Found {len(items)} items with [data-marker='item']")
-
-                # Альтернативные селекторы
-                if not items:
-                    items = soup.select("[class*='iva-item']")
-                    print(f"[Avito] Found {len(items)} items with [class*='iva-item']")
-
-                if not items:
-                    items = soup.select("[itemtype*='JobPosting']")
-                    print(f"[Avito] Found {len(items)} items with itemtype JobPosting")
-
-                if not items:
-                    # Ищем по структуре списка
-                    items = soup.select("div[class*='items-'] > div")
-                    print(f"[Avito] Found {len(items)} items in items container")
+                items = self._find_items(soup)
 
                 city_slug = self._get_city_slug(filters.city)
                 for item in items:
@@ -209,28 +198,46 @@ class AvitoParser(BaseParser):
                     if vacancy and self.matches_filters(vacancy, filters):
                         vacancies.append(vacancy)
 
+                print(f"[Avito] Page {page}: parsed {len(vacancies)} vacancies")
+
             elif response.status_code == 403:
-                print("[Avito] Access denied (403) - Avito blocked the request")
+                print("[Avito] 403 Forbidden - switching UA")
+                AvitoParser._request_count += 5  # Пропускаем несколько UA
+                raise Exception("403 Forbidden")
+
             elif response.status_code == 429:
-                print("[Avito] Rate limited (429) - backing off")
-                backoff_time = random.uniform(10.0, 15.0)
-                AvitoParser._last_request_time = time.time() + backoff_time
-                print(f"[Avito] Next request delayed by {backoff_time:.1f}s")
-                raise Exception("Rate limited")
-            else:
-                print(f"[Avito] Unexpected status: {response.status_code}")
+                backoff = 15.0 * (2 ** AvitoParser._retry_count)
+                print(f"[Avito] 429 Rate limited, backoff {backoff:.1f}s")
+                AvitoParser._last_request_time = time.time() + backoff
+                raise Exception("429 Rate limited")
 
         return vacancies
 
+    def _find_items(self, soup: BeautifulSoup) -> list:
+        """Поиск элементов вакансий разными селекторами"""
+        selectors = [
+            "[data-marker='item']",
+            "[class*='iva-item']",
+            "[itemtype*='JobPosting']",
+            "div[class*='items-'] > div[class*='item']",
+        ]
+
+        for selector in selectors:
+            items = soup.select(selector)
+            if items:
+                print(f"[Avito] Found {len(items)} items with '{selector}'")
+                return items
+
+        print("[Avito] No items found with any selector")
+        return []
+
     def _get_city_slug(self, city: str) -> str:
-        """Получить slug города для URL (автоматическая транслитерация)"""
+        """Slug города для URL"""
         if not city:
             return "rossiya"
         city_lower = city.lower().strip()
-        # Если передали "россия" — это вся страна
         if city_lower in ("россия", "russia", "рф", "rf", "rossiya"):
             return "rossiya"
-        # Автоматическая транслитерация (Avito использует '_' как разделитель)
         return self.transliterate_city(city, separator="_")
 
     def _parse_vacancy(self, item, city: str) -> Optional[Vacancy]:
@@ -239,7 +246,6 @@ class AvitoParser(BaseParser):
             # ID
             item_id = item.get("data-item-id", "") or item.get("id", "")
             if not item_id:
-                # Пробуем найти ID в ссылке
                 link = item.select_one("a[href*='/vakansii/']")
                 if link:
                     href = link.get("href", "")
@@ -247,42 +253,31 @@ class AvitoParser(BaseParser):
                     if match:
                         item_id = match.group(1)
 
-            # Название - пробуем разные селекторы
+            # Название
             title = ""
-            title_selectors = [
-                "[itemprop='name']",
-                "h3[data-marker='item-title']",
-                "[class*='title'] a",
-                "a[title]",
-                "a[href*='/vakansii/']"
-            ]
-            for selector in title_selectors:
-                title_elem = item.select_one(selector)
-                if title_elem:
-                    title = title_elem.get_text(strip=True) or title_elem.get("title", "")
+            for selector in ["[itemprop='name']", "h3[data-marker='item-title']", "[class*='title'] a", "a[title]", "a[href*='/vakansii/']"]:
+                elem = item.select_one(selector)
+                if elem:
+                    title = elem.get_text(strip=True) or elem.get("title", "")
                     if title:
                         break
 
-            # Ссылка
+            if not title:
+                return None
+
+            # URL
             url = ""
             link_elem = item.select_one("a[itemprop='url']") or item.select_one("a[href*='/vakansii/']")
             if link_elem:
                 href = link_elem.get("href", "")
                 url = href if href.startswith("http") else self.base_url + href
 
-            # Цена/Зарплата
-            salary_from = None
-            salary_to = None
-
-            price_selectors = [
-                "[itemprop='price']",
-                "[data-marker='item-price']",
-                "[class*='price']",
-            ]
-            for selector in price_selectors:
-                price_elem = item.select_one(selector)
-                if price_elem:
-                    price_text = price_elem.get("content", "") or price_elem.get_text(strip=True)
+            # Зарплата
+            salary_from, salary_to = None, None
+            for selector in ["[itemprop='price']", "[data-marker='item-price']", "[class*='price']"]:
+                elem = item.select_one(selector)
+                if elem:
+                    price_text = elem.get("content", "") or elem.get_text(strip=True)
                     salary_from, salary_to = self._parse_salary(price_text)
                     if salary_from or salary_to:
                         break
@@ -291,26 +286,16 @@ class AvitoParser(BaseParser):
             company = "Работодатель на Avito"
             company_elem = item.select_one("[data-marker='item-address']")
             if company_elem:
-                company_text = company_elem.get_text(strip=True)
-                if company_text:
-                    company = company_text
+                company = company_elem.get_text(strip=True) or company
 
             # Описание
             description = ""
-            desc_selectors = [
-                "[class*='description']",
-                "[data-marker='item-description']",
-                "[class*='snippet']"
-            ]
-            for selector in desc_selectors:
-                desc_elem = item.select_one(selector)
-                if desc_elem:
-                    description = desc_elem.get_text(strip=True)[:500]
+            for selector in ["[class*='description']", "[data-marker='item-description']", "[class*='snippet']"]:
+                elem = item.select_one(selector)
+                if elem:
+                    description = elem.get_text(strip=True)[:500]
                     if description:
                         break
-
-            if not title:
-                return None
 
             return Vacancy(
                 id=f"avito_{item_id or hash(title)}",
@@ -325,27 +310,21 @@ class AvitoParser(BaseParser):
             )
 
         except Exception as e:
-            print(f"[Avito] Error parsing vacancy: {e}")
+            print(f"[Avito] Parse error: {e}")
             return None
 
     def _parse_salary(self, text: str) -> tuple[Optional[int], Optional[int]]:
-        """Парсинг зарплаты из текста"""
+        """Парсинг зарплаты"""
         if not text:
             return None, None
 
-        # Убираем пробелы и символы
         text = text.replace("\xa0", "").replace(" ", "").replace("₽", "").lower()
-
-        salary_from = None
-        salary_to = None
+        salary_from, salary_to = None, None
 
         try:
-            # Находим все числа
             numbers = re.findall(r"\d+", text)
-
             if "от" in text and "до" in text and len(numbers) >= 2:
-                salary_from = int(numbers[0])
-                salary_to = int(numbers[1])
+                salary_from, salary_to = int(numbers[0]), int(numbers[1])
             elif "от" in text and numbers:
                 salary_from = int(numbers[0])
             elif "до" in text and numbers:
