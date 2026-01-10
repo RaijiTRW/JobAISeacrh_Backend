@@ -55,9 +55,8 @@ class VacancySearchTool:
         print(f"[Search] Running {len(parallel_tasks)} parallel tasks (HH + SuperJob)")
         parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
 
-        # Avito - выполняем ВСЕ запросы для максимального охвата
-        # Пагинация внутри парсера обеспечит достаточное количество
-        avito_queries = queries[:4]  # До 4 запросов для максимального охвата
+        # Avito - максимум 2 запроса для скорости
+        avito_queries = queries[:2]
         avito_results = []
 
         print(f"[Search] Running Avito search ({len(avito_queries)} queries)")
@@ -110,8 +109,8 @@ class VacancySearchTool:
         unique_vacancies = self._semantic_dedupe(unique_vacancies)
         print(f"[Search] After semantic dedupe: {len(unique_vacancies)} unique")
 
-        # Балансируем источники — берём всё что нашли
-        max_per_source = self.settings.max_total_vacancies // 3 + 20  # ~85 с каждого источника
+        # Балансируем источники
+        max_per_source = self.settings.max_total_vacancies // 3 + 5  # ~25 с каждого источника
         by_source = {"hh": [], "avito": [], "superjob": []}
         for v in unique_vacancies:
             if v.source in by_source:

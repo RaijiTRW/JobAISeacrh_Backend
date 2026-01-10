@@ -56,88 +56,51 @@ class AvitoParser(BaseParser):
         cls._proxy_index += 1
         return proxy
 
-    async def search(self, filters: SearchFilters, limit: int = 100) -> list[Vacancy]:
-        """Поиск с smart retry"""
-        vacancies = []
+    async def search(self, filters: SearchFilters, limit: int = 30) -> list[Vacancy]:
+        """Быстрый поиск — одна попытка, без лишних retry"""
         settings = get_settings()
         has_proxy = bool(settings.proxy_urls)
 
         city_slug = self._get_city_slug(filters.city)
         base_url = f"{self.base_url}/{city_slug}/vakansii"
 
-        # Пробуем разные сортировки если 0 результатов
-        for sort_idx, sort_option in enumerate(self.SORT_OPTIONS):
-            if len(vacancies) >= limit:
-                break
+        # Один запрос с сортировкой по дате
+        vacancies = await self._fetch_with_retry(base_url, filters, 104, has_proxy)
 
-            page_vacancies = await self._fetch_with_retry(
-                base_url, filters, sort_option, has_proxy
-            )
-
-            if page_vacancies:
-                # Добавляем только уникальные
-                seen_ids = {v.id for v in vacancies}
-                for v in page_vacancies:
-                    if v.id not in seen_ids:
-                        vacancies.append(v)
-                        seen_ids.add(v.id)
-
-                print(f"[Avito] Sort {sort_option}: +{len(page_vacancies)}, total unique: {len(vacancies)}")
-
-                # Если нашли достаточно — не пробуем другие сортировки
-                if len(vacancies) >= 30:
-                    break
-            else:
-                print(f"[Avito] Sort {sort_option}: 0 results, trying next sort...")
+        # Если 0 — пробуем без сортировки
+        if not vacancies:
+            print("[Avito] Trying without sort...")
+            vacancies = await self._fetch_with_retry(base_url, filters, None, has_proxy)
 
         print(f"[Avito] Total vacancies found: {len(vacancies)}")
         return vacancies[:limit]
 
     async def _fetch_with_retry(
-        self, base_url: str, filters: SearchFilters, sort_option: int, has_proxy: bool
+        self, base_url: str, filters: SearchFilters, sort_option: int | None, has_proxy: bool
     ) -> list[Vacancy]:
-        """Fetch с retry при ошибках"""
-        max_retries = 3
-        vacancies = []
-
-        for retry in range(max_retries):
+        """Быстрый fetch — максимум 1 retry"""
+        try:
+            result = await self._fetch_page(base_url, filters, 1, sort_option, has_proxy)
+            return result if result else []
+        except Exception as e:
+            print(f"[Avito] Error: {e}, retrying once...")
+            await asyncio.sleep(2.0)
             try:
-                result = await self._fetch_page(base_url, filters, 1, sort_option, has_proxy)
-                if result:
-                    vacancies.extend(result)
-
-                    # Пробуем вторую страницу если есть результаты
-                    if len(result) >= 20:
-                        await asyncio.sleep(random.uniform(1.5, 3.0))
-                        page2 = await self._fetch_page(base_url, filters, 2, sort_option, has_proxy)
-                        if page2:
-                            vacancies.extend(page2)
-
-                    AvitoParser._retry_count = 0  # Сбрасываем счётчик
-                    return vacancies
-
-                # 0 результатов — не ошибка, просто нет данных
+                return await self._fetch_page(base_url, filters, 1, sort_option, has_proxy) or []
+            except Exception:
                 return []
 
-            except Exception as e:
-                AvitoParser._retry_count += 1
-                backoff = min(10.0 * (2 ** retry), 60.0)  # Exponential: 10s, 20s, 40s, max 60s
-                print(f"[Avito] Retry {retry + 1}/{max_retries}, backoff {backoff:.1f}s: {e}")
-                await asyncio.sleep(backoff)
-
-        return vacancies
-
     async def _fetch_page(
-        self, base_url: str, filters: SearchFilters, page: int, sort_option: int, has_proxy: bool
+        self, base_url: str, filters: SearchFilters, page: int, sort_option: int | None, has_proxy: bool
     ) -> list[Vacancy]:
         """Загрузка одной страницы"""
-        # Rate limiting
+        # Rate limiting (минимальный)
         current_time = time.time()
         time_since_last = current_time - AvitoParser._last_request_time
-        min_delay = 1.5 if has_proxy else 3.5
+        min_delay = 0.5 if has_proxy else 1.5
 
         if time_since_last < min_delay:
-            wait_time = min_delay - time_since_last + random.uniform(0.5, 1.5)
+            wait_time = min_delay - time_since_last + random.uniform(0.2, 0.5)
             await asyncio.sleep(wait_time)
 
         AvitoParser._last_request_time = time.time()
