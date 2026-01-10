@@ -45,6 +45,8 @@ class HHParser(BaseParser):
                 area_id = await self._get_area_id(filters.city)
                 if area_id:
                     params["area"] = area_id
+                else:
+                    print(f"[HH] Warning: city '{filters.city}' not found")
 
             # Зарплата
             if filters.salary_from:
@@ -62,6 +64,8 @@ class HHParser(BaseParser):
                 elif filters.employment_type in self.EMPLOYMENT_MAP:
                     params["employment"] = self.EMPLOYMENT_MAP[filters.employment_type]
 
+            print(f"[HH] Searching with params: {params}")
+
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/vacancies",
@@ -69,17 +73,25 @@ class HHParser(BaseParser):
                     headers={"User-Agent": "JobSearchApp/1.0"},
                     timeout=15.0,
                 )
+                print(f"[HH] Response status: {response.status_code}")
                 response.raise_for_status()
                 data = response.json()
 
-                for item in data.get("items", []):
+                total_found = data.get("found", 0)
+                items = data.get("items", [])
+                print(f"[HH] Found {total_found} total, got {len(items)} items")
+
+                for item in items:
                     vacancy = self._parse_vacancy(item)
                     if vacancy and self.matches_filters(vacancy, filters):
                         vacancies.append(vacancy)
 
         except Exception as e:
-            print(f"HH Parser error: {e}")
+            print(f"[HH] Parser error: {e}")
+            import traceback
+            traceback.print_exc()
 
+        print(f"[HH] Total vacancies: {len(vacancies)}")
         return vacancies
 
     async def _get_area_id(self, city: str) -> Optional[str]:
@@ -100,6 +112,14 @@ class HHParser(BaseParser):
             "ростов-на-дону": "76",
             "воронеж": "26",
             "пермь": "72",
+            "новороссийск": "1061",
+            "сочи": "237",
+            "волгоград": "24",
+            "самара": "78",
+            "уфа": "99",
+            "красноярск": "54",
+            "омск": "68",
+            "челябинск": "104",
         }
 
         if city_lower in CITY_CACHE:
