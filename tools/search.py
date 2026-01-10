@@ -98,14 +98,20 @@ class VacancySearchTool:
             elif isinstance(result, Exception):
                 print(f"Parser error: {result}")
 
-        # Удаляем дубликаты по названию + компании
-        seen = set()
+        # Удаляем дубликаты по ID и по названию + компании
+        seen_ids = set()
+        seen_keys = set()
         unique_vacancies = []
         for v in all_vacancies:
+            # Проверяем и по ID, и по ключу (title+company+city)
+            if v.id in seen_ids:
+                continue
             key = f"{v.title.lower()}_{v.company.lower()}_{v.city.lower()}"
-            if key not in seen:
-                seen.add(key)
-                unique_vacancies.append(v)
+            if key in seen_keys:
+                continue
+            seen_ids.add(v.id)
+            seen_keys.add(key)
+            unique_vacancies.append(v)
 
         print(f"[Search] Found {len(all_vacancies)} total, {len(unique_vacancies)} unique")
 
