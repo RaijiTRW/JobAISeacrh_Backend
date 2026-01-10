@@ -154,6 +154,11 @@ async def send_message_stream(request: ChatMessageRequest):
             print(f"First vacancy: {response.vacancies[0] if response.vacancies else 'none'}")
             yield f"data: {json.dumps({'type': 'vacancies', 'content': response.vacancies}, default=json_serializer)}\n\n"
 
+        # Отправляем отсеянные вакансии
+        print(f"Rejected vacancies to send: {len(response.rejected_vacancies)}")
+        if response.rejected_vacancies:
+            yield f"data: {json.dumps({'type': 'rejected_vacancies', 'content': response.rejected_vacancies}, default=json_serializer)}\n\n"
+
         # Завершение
         yield f"data: {json.dumps({'type': 'done', 'chat_id': response.chat_id})}\n\n"
 

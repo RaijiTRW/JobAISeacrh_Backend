@@ -13,6 +13,7 @@ from models.chat import ChatRequest, ChatResponse, UserPreferences
 from models.vacancy import SearchFilters
 from tools.search import vacancy_search
 from agents.validator import VacancyValidator
+from agents.query_generator import query_generator
 from services.user_profile import UserData
 
 
@@ -239,6 +240,7 @@ class Orchestrator:
         """Обработка ответа от OpenRouter"""
         text_parts = []
         vacancies = []
+        rejected_vacancies = []
 
         choice = response.get("choices", [{}])[0]
         message = choice.get("message", {})
@@ -261,22 +263,40 @@ class Orchestrator:
                     args = self._merge_with_preferences(args, preferences, user_data)
                     print(f"Search args after merge: {args}")
 
+                    # AI-генерация дополнительных запросов
+                    original_queries = args.get("queries", [])
+                    if original_queries:
+                        # Берём первый запрос как основу для генерации
+                        base_query = original_queries[0] if original_queries else args.get("query", "")
+                        ai_queries = await query_generator.generate_queries(base_query)
+                        # Объединяем: сначала AI-запросы, потом оригинальные (без дубликатов)
+                        all_queries = []
+                        seen = set()
+                        for q in ai_queries + original_queries:
+                            q_lower = q.lower().strip()
+                            if q_lower not in seen:
+                                seen.add(q_lower)
+                                all_queries.append(q)
+                        args["queries"] = all_queries[:10]  # Максимум 10 запросов
+                        print(f"Enhanced queries: {args['queries']}")
+
                     filters = SearchFilters(**args)
                     result = await vacancy_search.search(filters)
                     print(f"Search result: {len(result.vacancies)} vacancies found")
 
                     # Валидируем вакансии (передаём queries для контекстной фильтрации)
-                    validated = await self.validator.validate_batch(
+                    validation_result = await self.validator.validate_batch(
                         result.vacancies,
                         preferences,
                         queries=filters.queries,
                     )
-                    print(f"Validated: {len(validated)} vacancies")
+                    print(f"Validated: {len(validation_result.validated)} vacancies, rejected: {len(validation_result.rejected)}")
 
-                    vacancies = [v.model_dump(mode='json') for v in validated]
+                    vacancies = [v.model_dump(mode='json') for v in validation_result.validated]
+                    rejected_vacancies = [v.model_dump(mode='json') for v in validation_result.rejected]
 
                     text_parts.append(
-                        f"\n\nНашёл {len(validated)} подходящих вакансий из {result.total_found} найденных."
+                        f"\n\nНашёл {len(validation_result.validated)} подходящих вакансий из {result.total_found} найденных."
                     )
                 except Exception as e:
                     print(f"Error processing tool call: {e}")
@@ -286,6 +306,7 @@ class Orchestrator:
         return ChatResponse(
             message=" ".join(text_parts) if text_parts else "Что-то пошло не так, попробуй ещё раз.",
             vacancies=vacancies,
+            rejected_vacancies=rejected_vacancies,
             needs_clarification=len(vacancies) == 0 and not preferences.is_complete(),
             chat_id=str(hash(str(preferences))),
         )

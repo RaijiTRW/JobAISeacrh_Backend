@@ -4,9 +4,17 @@ AI-фильтрация с пониманием контекста
 """
 
 import httpx
+from dataclasses import dataclass
 from models.vacancy import Vacancy
 from models.chat import UserPreferences
 from config import get_settings
+
+
+@dataclass
+class ValidationResult:
+    """Результат валидации вакансий"""
+    validated: list[Vacancy]
+    rejected: list[Vacancy]
 
 
 class VacancyValidator:
@@ -28,10 +36,10 @@ class VacancyValidator:
         vacancies: list[Vacancy],
         preferences: UserPreferences,
         queries: list[str] = None,
-    ) -> list[Vacancy]:
+    ) -> ValidationResult:
         """AI-фильтрация вакансий"""
         if not vacancies:
-            return []
+            return ValidationResult(validated=[], rejected=[])
 
         queries = queries or []
         queries_text = " ".join(queries).lower()
@@ -44,6 +52,8 @@ class VacancyValidator:
 
         # Шаг 1: Быстрая фильтрация стоп-словами (без AI)
         pre_filtered = []
+        pre_rejected = []  # Отсеянные на этапе пре-фильтра
+
         for vacancy in vacancies:
             title_lower = (vacancy.title or "").lower()
 
@@ -55,6 +65,7 @@ class VacancyValidator:
                     has_stop = True
                     break
             if has_stop:
+                pre_rejected.append(vacancy)
                 continue
 
             # Пользовательские исключения
@@ -66,29 +77,39 @@ class VacancyValidator:
                     user_excluded = True
                     break
             if user_excluded:
+                pre_rejected.append(vacancy)
                 continue
 
             # Проверка зарплаты
             if preferences.salary_from:
                 if vacancy.salary_to and vacancy.salary_to < preferences.salary_from:
+                    pre_rejected.append(vacancy)
                     continue
 
             pre_filtered.append(vacancy)
 
-        print(f"[Validator] After pre-filter: {len(pre_filtered)} vacancies")
+        print(f"[Validator] After pre-filter: {len(pre_filtered)} vacancies, {len(pre_rejected)} rejected")
 
         if not pre_filtered:
-            return []
+            return ValidationResult(validated=[], rejected=pre_rejected)
 
         # Шаг 2: AI-фильтрация (батчами по 10)
-        result = await self._ai_filter(pre_filtered, queries_text)
+        ai_result = await self._ai_filter(pre_filtered, queries_text)
 
-        print(f"[Validator] Result: {len(vacancies)} -> {len(result)} vacancies")
-        return result
+        # Собираем отсеянные AI
+        validated_ids = {v.id for v in ai_result.validated}
+        ai_rejected = [v for v in pre_filtered if v.id not in validated_ids]
 
-    async def _ai_filter(self, vacancies: list[Vacancy], search_query: str) -> list[Vacancy]:
+        # Объединяем все отсеянные
+        all_rejected = pre_rejected + ai_rejected
+
+        print(f"[Validator] Result: {len(vacancies)} -> {len(ai_result.validated)} validated, {len(all_rejected)} rejected")
+        return ValidationResult(validated=ai_result.validated, rejected=all_rejected)
+
+    async def _ai_filter(self, vacancies: list[Vacancy], search_query: str) -> ValidationResult:
         """AI-фильтрация вакансий"""
-        result = []
+        validated = []
+        rejected = []
         batch_size = 15  # Обрабатываем по 15 вакансий за раз
 
         for i in range(0, len(vacancies), batch_size):
@@ -98,11 +119,12 @@ class VacancyValidator:
             for vacancy in batch:
                 if vacancy.id in approved_ids:
                     print(f"[Validator] AI OK '{vacancy.title}'")
-                    result.append(vacancy)
+                    validated.append(vacancy)
                 else:
                     print(f"[Validator] AI SKIP '{vacancy.title}'")
+                    rejected.append(vacancy)
 
-        return result
+        return ValidationResult(validated=validated, rejected=rejected)
 
     async def _check_batch_with_ai(self, vacancies: list[Vacancy], search_query: str) -> set[str]:
         """Проверяет батч вакансий через AI, возвращает ID подходящих"""

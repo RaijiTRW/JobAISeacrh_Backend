@@ -18,6 +18,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     message: str
     vacancies: list[dict] = []
+    rejected_vacancies: list[dict] = []  # Отсеянные вакансии
     needs_clarification: bool = False
     clarification_questions: list[str] = []
     chat_id: str
