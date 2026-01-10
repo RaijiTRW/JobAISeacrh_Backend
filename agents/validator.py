@@ -10,17 +10,23 @@ from models.chat import UserPreferences
 class VacancyValidator:
     """Валидатор с позитивной фильтрацией"""
 
-    # Ключевые слова для каждой категории - вакансия ДОЛЖНА содержать хотя бы одно В НАЗВАНИИ
-    MUST_CONTAIN_TITLE = {
+    # Ключевые слова для каждой категории - проверяем в названии И описании
+    MUST_CONTAIN = {
         "пвз": [
-            "пвз", "пункт выдачи", "пункта выдачи", "пунктом выдачи",  # падежи
-            "выдача заказов", "выдачи заказов", "выдачу заказов", "выдачей заказов Ozon", "Сотрудник пункта выдачи (пвз) озон",
-            "Менеджер пункта заказов", "Сотрудник пункта выдачи заказов", "Сотрудник пункта выдачи wildberries", "Сотрудник пвз",
-            "Ozon (Озон) специалист в пвз", "Wildberries (Вайлдберриз) специалист в пвз", "OZON", "WILDBERRIES",
+            # Основные
+            "пвз", "pvz",
+            # Падежи "пункт выдачи"
+            "пункт выдачи", "пункта выдачи", "пункте выдачи", "пунктом выдачи", "пункту выдачи",
+            # Падежи "выдача заказов"
+            "выдача заказов", "выдачи заказов", "выдачу заказов", "выдачей заказов",
+            # Маркетплейсы (если в контексте работы, не курьер)
+            "wildberries", "вайлдберриз", "вайлдбериз", "вб",
+            "ozon", "озон",
+            "яндекс маркет", "yandex market",
         ],
-        "бариста": ["бариста", "barista"],
-        "кассир": ["кассир"],
-        "продавец": ["продавец"],
+        "бариста": ["бариста", "barista", "кофейня", "кофе-бар"],
+        "кассир": ["кассир", "касса", "кассов"],
+        "продавец": ["продавец", "продавц", "консультант"],
     }
 
     # Стоп-слова в названии - всегда исключаем
@@ -54,8 +60,8 @@ class VacancyValidator:
         category = self._detect_category(queries_text)
         print(f"[Validator] Category: {category}")
 
-        # Получаем обязательные ключевые слова для категории (проверяем в НАЗВАНИИ)
-        must_contain = self.MUST_CONTAIN_TITLE.get(category, [])
+        # Получаем обязательные ключевые слова для категории
+        must_contain = self.MUST_CONTAIN.get(category, [])
 
         # Пользовательские исключения
         user_exclusions = [w.lower().strip() for w in preferences.exclude_keywords if w]
@@ -64,9 +70,12 @@ class VacancyValidator:
         for vacancy in vacancies:
             title_lower = (vacancy.title or "").lower()
             company_lower = (vacancy.company or "").lower()
-            full_text = f"{title_lower} {company_lower}"
+            description_lower = (vacancy.description or "").lower()
+            url_lower = (vacancy.url or "").lower()
+            # Полный текст для поиска ключевых слов (включая URL — там часто есть ключи)
+            full_text = f"{title_lower} {description_lower} {company_lower} {url_lower}"
 
-            # 1. Проверяем стоп-слова в названии
+            # 1. Проверяем стоп-слова в названии (только в названии!)
             has_stop = False
             for stop in self.TITLE_STOP_WORDS:
                 if stop in title_lower:
@@ -76,12 +85,22 @@ class VacancyValidator:
             if has_stop:
                 continue
 
-            # 2. Если есть категория - НАЗВАНИЕ должно содержать ключевое слово
+            # 2. Если есть категория - ищем ключевые слова в названии, описании ИЛИ URL
             if must_contain:
                 has_keyword = False
+                found_in = None
                 for keyword in must_contain:
-                    if keyword in title_lower:  # Только в названии!
+                    if keyword in title_lower:
                         has_keyword = True
+                        found_in = "title"
+                        break
+                    elif keyword in description_lower:
+                        has_keyword = True
+                        found_in = "desc"
+                        break
+                    elif keyword in url_lower:
+                        has_keyword = True
+                        found_in = "url"
                         break
                 if not has_keyword:
                     print(f"[Validator] SKIP '{vacancy.title}' - no keywords for {category}")

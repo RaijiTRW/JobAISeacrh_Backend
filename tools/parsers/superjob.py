@@ -21,14 +21,17 @@ class SuperJobParser(BaseParser):
         vacancies = []
 
         try:
-            city_slug = self._get_city_slug(filters.city)
-            url = f"{self.base_url}/vakansii"
-            if city_slug:
-                url = f"{self.base_url}/vakansii/{city_slug}"
+            # SuperJob использует geo[t][0]=ID для города
+            url = f"{self.base_url}/vakansii/"
 
             params = {}
             if filters.query:
                 params["keywords"] = filters.query
+
+            # Добавляем город по ID
+            city_id = self._get_city_id(filters.city)
+            if city_id:
+                params["geo[t][0]"] = city_id
 
             # Фильтр зарплаты
             if filters.salary_from:
@@ -127,16 +130,38 @@ class SuperJobParser(BaseParser):
         print(f"[SuperJob] Total vacancies found: {len(vacancies)}")
         return vacancies
 
-    def _get_city_slug(self, city: str) -> str:
-        """Получить slug города для URL (автоматическая транслитерация)"""
+    # Маппинг городов на ID в SuperJob
+    CITY_IDS = {
+        "москва": "4",
+        "санкт-петербург": "2",
+        "спб": "2",
+        "питер": "2",
+        "новосибирск": "13",
+        "екатеринбург": "14",
+        "нижний новгород": "22",
+        "казань": "34",
+        "краснодар": "12",
+        "ростов-на-дону": "15",
+        "новороссийск": "961",
+        "сочи": "55",
+        "воронеж": "21",
+        "пермь": "23",
+        "волгоград": "17",
+        "самара": "19",
+        "уфа": "18",
+        "красноярск": "16",
+        "омск": "20",
+        "челябинск": "24",
+    }
+
+    def _get_city_id(self, city: str) -> Optional[str]:
+        """Получить ID города для SuperJob"""
         if not city:
-            return ""
+            return None
         city_lower = city.lower().strip()
-        # Если передали "россия" — это вся страна (без slug)
         if city_lower in ("россия", "russia", "рф", "rf", "rossiya"):
-            return ""
-        # Автоматическая транслитерация (SuperJob использует '-' как разделитель)
-        return self.transliterate_city(city, separator="-")
+            return None
+        return self.CITY_IDS.get(city_lower)
 
     def _parse_vacancy(self, item, city: str) -> Optional[Vacancy]:
         """Парсинг вакансии из HTML"""
