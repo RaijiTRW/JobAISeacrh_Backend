@@ -44,16 +44,19 @@ class AvitoParser(BaseParser):
 
     @classmethod
     def _get_proxy(cls) -> Optional[str]:
-        """Ротация прокси"""
+        """Ротация прокси — каждый запрос новый прокси"""
         settings = get_settings()
         if not settings.proxy_urls:
             return None
         if not cls._proxy_list:
             cls._proxy_list = [p.strip() for p in settings.proxy_urls.split(",") if p.strip()]
+            print(f"[Avito] Loaded {len(cls._proxy_list)} proxies")
         if not cls._proxy_list:
             return None
+        # Всегда берём следующий прокси
         proxy = cls._proxy_list[cls._proxy_index % len(cls._proxy_list)]
         cls._proxy_index += 1
+        print(f"[Avito] Using proxy #{cls._proxy_index % len(cls._proxy_list) + 1}/{len(cls._proxy_list)}")
         return proxy
 
     async def search(self, filters: SearchFilters, limit: int = 30) -> list[Vacancy]:
@@ -94,14 +97,12 @@ class AvitoParser(BaseParser):
         self, base_url: str, filters: SearchFilters, page: int, sort_option: int | None, has_proxy: bool
     ) -> list[Vacancy]:
         """Загрузка одной страницы"""
-        # Rate limiting (минимальный)
-        current_time = time.time()
-        time_since_last = current_time - AvitoParser._last_request_time
-        min_delay = 0.5 if has_proxy else 1.5
-
-        if time_since_last < min_delay:
-            wait_time = min_delay - time_since_last + random.uniform(0.2, 0.5)
-            await asyncio.sleep(wait_time)
+        # Минимальная задержка с прокси, больше без
+        if not has_proxy:
+            current_time = time.time()
+            time_since_last = current_time - AvitoParser._last_request_time
+            if time_since_last < 1.5:
+                await asyncio.sleep(1.5 - time_since_last + random.uniform(0.2, 0.5))
 
         AvitoParser._last_request_time = time.time()
         AvitoParser._request_count += 1
