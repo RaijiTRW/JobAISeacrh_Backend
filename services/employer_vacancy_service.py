@@ -371,6 +371,7 @@ class EmployerVacancyService:
             url=f"/vacancies/{ev.id}",  # Внутренняя ссылка
             source="platform",
             published_at=ev.published_at,
+            user_id=ev.user_id,  # Для определения владельца
         )
 
 

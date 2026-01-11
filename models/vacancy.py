@@ -15,8 +15,9 @@ class Vacancy(BaseModel):
     employment_type: Optional[str] = None  # full, part, remote
     description: str
     url: str
-    source: str  # hh, avito, superjob
+    source: str  # hh, avito, superjob, platform
     published_at: Optional[datetime] = None
+    user_id: Optional[str] = None  # ID владельца (для platform вакансий)
 
     @property
     def salary_display(self) -> str:
