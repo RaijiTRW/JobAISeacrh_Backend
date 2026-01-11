@@ -35,61 +35,48 @@ class VacancyFeedService:
 
     async def get_feed(self, filters: FeedFilters) -> FeedResult:
         """
-        Получить ленту вакансий с фильтрацией и пагинацией.
-        Сначала пробуем из БД, если пусто — fallback на live парсинг.
+        Получить ленту вакансий из БД.
+        БД наполняется scheduler'ом каждые 2 часа.
         """
         print(f"[Feed] Getting feed: query={filters.query}, city={filters.city}, page={filters.page}")
 
-        # Если нет query, возвращаем пустой результат
-        if not filters.query:
-            return FeedResult(vacancies=[], total=0, page=1, pages=1, has_next=False)
-
-        # 1. Пробуем получить из БД
+        # Читаем только из БД
         vacancies, total = await self._fetch_from_db(filters)
 
-        if vacancies:
-            print(f"[Feed] Got {len(vacancies)} from DB (total: {total})")
-            pages = (total + filters.limit - 1) // filters.limit if total > 0 else 1
-            return FeedResult(
-                vacancies=vacancies,
-                total=total,
-                page=filters.page,
-                pages=pages,
-                has_next=filters.page < pages,
-            )
+        print(f"[Feed] Got {len(vacancies)} from DB (total: {total})")
+        pages = (total + filters.limit - 1) // filters.limit if total > 0 else 1
 
-        # 2. Fallback на live парсинг (если БД пуста)
-        print("[Feed] DB empty, falling back to live parsing...")
-        vacancies = await self._fetch_all_sources(filters)
-        print(f"[Feed] Fetched {len(vacancies)} vacancies from live sources")
-
-        # Дедупликация
-        vacancies = self._deduplicate(vacancies)
-        print(f"[Feed] After deduplication: {len(vacancies)}")
-
-        # Фильтрация
-        vacancies = self._filter(vacancies, filters)
-        print(f"[Feed] After filtering: {len(vacancies)}")
-
-        # Сортировка
-        vacancies = self._sort(vacancies, filters.sort)
-
-        # Пагинация
-        return self._paginate(vacancies, filters.page, filters.limit)
+        return FeedResult(
+            vacancies=vacancies,
+            total=total,
+            page=filters.page,
+            pages=pages,
+            has_next=filters.page < pages,
+        )
 
     async def _fetch_from_db(self, filters: FeedFilters) -> tuple[list[Vacancy], int]:
         """Получить вакансии из БД"""
         try:
             offset = (filters.page - 1) * filters.limit
 
-            stored_vacancies, total = await vacancy_storage_service.search_vacancies(
-                query=filters.query,
-                city=filters.city,
-                salary_from=filters.salary_from,
-                experience=filters.experience,
-                limit=filters.limit,
-                offset=offset,
-            )
+            # Если есть query — поиск, иначе все вакансии
+            if filters.query:
+                stored_vacancies, total = await vacancy_storage_service.search_vacancies(
+                    query=filters.query,
+                    city=filters.city,
+                    salary_from=filters.salary_from,
+                    experience=filters.experience,
+                    limit=filters.limit,
+                    offset=offset,
+                )
+            else:
+                stored_vacancies, total = await vacancy_storage_service.get_all_vacancies(
+                    city=filters.city,
+                    salary_from=filters.salary_from,
+                    experience=filters.experience,
+                    limit=filters.limit,
+                    offset=offset,
+                )
 
             # Конвертируем в Vacancy
             vacancies = [

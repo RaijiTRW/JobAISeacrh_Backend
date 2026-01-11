@@ -153,6 +153,61 @@ class VacancyStorageService:
             print(f"[Storage] Get exception: {e}")
             return []
 
+    async def get_all_vacancies(
+        self,
+        city: Optional[str] = None,
+        salary_from: Optional[int] = None,
+        experience: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[StoredVacancy], int]:
+        """
+        Получить все активные вакансии с пагинацией.
+        Возвращает (вакансии, общее количество)
+        """
+        try:
+            params = {
+                "select": "*",
+                "is_active": "eq.true",
+                "order": "created_at.desc",
+                "limit": str(limit),
+                "offset": str(offset),
+            }
+
+            if city:
+                params["city"] = f"ilike.%{city}%"
+
+            if experience:
+                params["experience"] = f"eq.{experience}"
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/rest/v1/{self.table}",
+                    params=params,
+                    headers={
+                        **self._headers(),
+                        "Prefer": "count=exact",
+                    },
+                    timeout=15.0,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    content_range = response.headers.get("content-range", "")
+                    total = 0
+                    if "/" in content_range:
+                        total = int(content_range.split("/")[1])
+
+                    vacancies = [StoredVacancy(**row) for row in data]
+                    return vacancies, total
+                else:
+                    print(f"[Storage] Get all error: {response.status_code}")
+                    return [], 0
+
+        except Exception as e:
+            print(f"[Storage] Get all exception: {e}")
+            return [], 0
+
     async def search_vacancies(
         self,
         query: str,
@@ -167,31 +222,23 @@ class VacancyStorageService:
         Возвращает (вакансии, общее количество)
         """
         try:
-            # Формируем запрос для full-text search
-            search_query = " & ".join(query.split())  # "менеджер продаж" -> "менеджер & продаж"
-
-            # Сначала получаем общее количество
-            count_params = {
-                "select": "id",
-                "is_active": "eq.true",
-            }
-
-            if city:
-                count_params["city"] = f"ilike.%{city}%"
-
             async with httpx.AsyncClient() as client:
                 # Получаем вакансии
+                params = {
+                    "select": "*",
+                    "is_active": "eq.true",
+                    "or": f"(title.ilike.%{query}%,description.ilike.%{query}%,company.ilike.%{query}%)",
+                    "order": "created_at.desc",
+                    "limit": str(limit),
+                    "offset": str(offset),
+                }
+
+                if city:
+                    params["city"] = f"ilike.%{city}%"
+
                 response = await client.get(
                     f"{self.base_url}/rest/v1/{self.table}",
-                    params={
-                        "select": "*",
-                        "is_active": "eq.true",
-                        "or": f"(title.ilike.%{query}%,description.ilike.%{query}%,company.ilike.%{query}%)",
-                        "order": "created_at.desc",
-                        "limit": str(limit),
-                        "offset": str(offset),
-                        **({"city": f"ilike.%{city}%"} if city else {}),
-                    },
+                    params=params,
                     headers={
                         **self._headers(),
                         "Prefer": "count=exact",
