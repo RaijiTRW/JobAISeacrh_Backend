@@ -49,17 +49,24 @@ class AdminService:
     async def is_admin(self, user_id: str) -> bool:
         """Проверить, является ли пользователь админом"""
         try:
+            print(f"[Admin] is_admin check for user_id: {user_id}")
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/rest/v1/profiles",
-                    params={"id": f"eq.{user_id}", "select": "role"},
+                    params={"user_id": f"eq.{user_id}", "select": "role"},
                     headers=self._headers(),
                     timeout=10.0,
                 )
+                print(f"[Admin] is_admin response status: {response.status_code}")
+                print(f"[Admin] is_admin response body: {response.text}")
                 if response.status_code == 200:
                     data = response.json()
                     if data and len(data) > 0:
-                        return data[0].get("role") == "admin"
+                        role = data[0].get("role")
+                        print(f"[Admin] Found role: {role}")
+                        return role == "admin"
+                    else:
+                        print(f"[Admin] No profile found for user_id: {user_id}")
             return False
         except Exception as e:
             print(f"[Admin] is_admin error: {e}")
@@ -206,7 +213,7 @@ class AdminService:
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{self.base_url}/rest/v1/profiles",
-                    params={"id": f"eq.{user_id}"},
+                    params={"user_id": f"eq.{user_id}"},
                     headers=self._headers(),
                     json={"is_banned": True, "ban_reason": reason},
                     timeout=10.0,
@@ -222,7 +229,7 @@ class AdminService:
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{self.base_url}/rest/v1/profiles",
-                    params={"id": f"eq.{user_id}"},
+                    params={"user_id": f"eq.{user_id}"},
                     headers=self._headers(),
                     json={"is_banned": False, "ban_reason": None},
                     timeout=10.0,
@@ -238,7 +245,7 @@ class AdminService:
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{self.base_url}/rest/v1/profiles",
-                    params={"id": f"eq.{user_id}"},
+                    params={"user_id": f"eq.{user_id}"},
                     headers=self._headers(),
                     json={"can_create_vacancies": can_create},
                     timeout=10.0,
@@ -259,7 +266,7 @@ class AdminService:
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{self.base_url}/rest/v1/profiles",
-                    params={"id": f"eq.{user_id}"},
+                    params={"user_id": f"eq.{user_id}"},
                     headers=self._headers(),
                     json={
                         "subscription_type": subscription_type,
@@ -280,7 +287,7 @@ class AdminService:
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{self.base_url}/rest/v1/profiles",
-                    params={"id": f"eq.{user_id}"},
+                    params={"user_id": f"eq.{user_id}"},
                     headers=self._headers(),
                     json={"role": role},
                     timeout=10.0,
@@ -357,7 +364,7 @@ class AdminService:
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{self.base_url}/rest/v1/profiles",
-                    params={"id": f"eq.{user_id}"},
+                    params={"user_id": f"eq.{user_id}"},
                     headers=self._headers(),
                     json={"last_seen_at": datetime.utcnow().isoformat()},
                     timeout=5.0,

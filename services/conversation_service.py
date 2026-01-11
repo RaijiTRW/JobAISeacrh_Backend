@@ -174,7 +174,7 @@ class ConversationService:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{self.base_url}/rest/v1/messages",
+                    f"{self.base_url}/rest/v1/conversation_messages",
                     params={
                         "conversation_id": f"eq.{conversation_id}",
                         "select": "*",
@@ -212,7 +212,7 @@ class ConversationService:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{self.base_url}/rest/v1/messages",
+                    f"{self.base_url}/rest/v1/conversation_messages",
                     headers={**self._headers(token), "Prefer": "return=representation"},
                     json={
                         "conversation_id": conversation_id,
@@ -278,7 +278,7 @@ class ConversationService:
                 # Отмечаем сообщения как прочитанные
                 other_user_id = conv["employer_id"] if is_applicant else conv["applicant_id"]
                 response = await client.patch(
-                    f"{self.base_url}/rest/v1/messages",
+                    f"{self.base_url}/rest/v1/conversation_messages",
                     params={
                         "conversation_id": f"eq.{conversation_id}",
                         "sender_id": f"eq.{other_user_id}",
