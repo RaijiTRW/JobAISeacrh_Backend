@@ -12,6 +12,7 @@ class FeedFilters(BaseModel):
     city: Optional[str] = None
     salary_from: Optional[int] = None
     experience: Optional[str] = None  # no_experience, 1-3, 3-6, 6+
+    source: Optional[str] = None  # platform, network, all
     sort: str = Field(default="date", description="date, salary_desc, salary_asc, relevance")
     page: int = Field(default=1, ge=1)
     limit: int = Field(default=20, ge=1, le=100)

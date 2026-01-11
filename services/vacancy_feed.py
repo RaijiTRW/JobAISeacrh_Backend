@@ -60,46 +60,57 @@ class VacancyFeedService:
         try:
             offset = (filters.page - 1) * filters.limit
 
-            # === 1. Вакансии из сети (hh, avito, superjob) ===
-            if filters.query:
-                stored_vacancies, network_total = await vacancy_storage_service.search_vacancies(
-                    query=filters.query,
-                    city=filters.city,
-                    salary_from=filters.salary_from,
-                    experience=filters.experience,
-                    limit=filters.limit,
-                    offset=offset,
-                )
-            else:
-                stored_vacancies, network_total = await vacancy_storage_service.get_all_vacancies(
-                    city=filters.city,
-                    salary_from=filters.salary_from,
-                    experience=filters.experience,
-                    limit=filters.limit,
-                    offset=offset,
-                )
+            network_vacancies = []
+            network_total = 0
+            platform_vacancies = []
+            platform_total = 0
 
-            # Конвертируем в Vacancy
-            network_vacancies = [
-                vacancy_storage_service.to_vacancy(sv)
-                for sv in stored_vacancies
-            ]
+            # Фильтр по источнику
+            include_network = filters.source is None or filters.source == "network"
+            include_platform = filters.source is None or filters.source == "platform"
+
+            # === 1. Вакансии из сети (hh, avito, superjob) ===
+            if include_network:
+                if filters.query:
+                    stored_vacancies, network_total = await vacancy_storage_service.search_vacancies(
+                        query=filters.query,
+                        city=filters.city,
+                        salary_from=filters.salary_from,
+                        experience=filters.experience,
+                        limit=filters.limit,
+                        offset=offset,
+                    )
+                else:
+                    stored_vacancies, network_total = await vacancy_storage_service.get_all_vacancies(
+                        city=filters.city,
+                        salary_from=filters.salary_from,
+                        experience=filters.experience,
+                        limit=filters.limit,
+                        offset=offset,
+                    )
+
+                # Конвертируем в Vacancy
+                network_vacancies = [
+                    vacancy_storage_service.to_vacancy(sv)
+                    for sv in stored_vacancies
+                ]
 
             # === 2. Наши вакансии (employer_vacancies) ===
-            employer_vacancies, platform_total = await employer_vacancy_service.get_published_vacancies(
-                query=filters.query,
-                city=filters.city,
-                limit=filters.limit,
-                offset=offset,
-            )
+            if include_platform:
+                employer_vacancies, platform_total = await employer_vacancy_service.get_published_vacancies(
+                    query=filters.query,
+                    city=filters.city,
+                    limit=filters.limit,
+                    offset=offset,
+                )
 
-            # Конвертируем employer вакансии в Vacancy формат
-            platform_vacancies = [
-                employer_vacancy_service.to_vacancy(ev)
-                for ev in employer_vacancies
-            ]
+                # Конвертируем employer вакансии в Vacancy формат
+                platform_vacancies = [
+                    employer_vacancy_service.to_vacancy(ev)
+                    for ev in employer_vacancies
+                ]
 
-            print(f"[Feed] Network: {len(network_vacancies)}, Platform: {len(platform_vacancies)}")
+            print(f"[Feed] Network: {len(network_vacancies)}, Platform: {len(platform_vacancies)}, source={filters.source}")
 
             # === 3. Объединяем (наши вакансии в приоритете — сверху) ===
             all_vacancies = platform_vacancies + network_vacancies

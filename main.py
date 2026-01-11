@@ -11,6 +11,8 @@ from config import get_settings
 from api.routes import chat
 from api.routes import vacancies
 from api.routes import employer_vacancies
+from api.routes import admin
+from api.routes import conversations
 from scheduler import start_scheduler, shutdown_scheduler
 from scheduler.scheduler import (
     get_job_status,
@@ -60,6 +62,8 @@ app.add_middleware(
 app.include_router(chat.router, prefix="/api")
 app.include_router(vacancies.router, prefix="/api/vacancies")
 app.include_router(employer_vacancies.router)
+app.include_router(admin.router)
+app.include_router(conversations.router)
 
 
 @app.get("/")
