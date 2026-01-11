@@ -21,6 +21,8 @@ from scheduler.human_behavior import (
     get_batch_size,
     get_random_query,
     get_random_city,
+    get_random_queries,
+    get_random_cities,
     POPULAR_QUERIES,
     POPULAR_CITIES,
 )
@@ -61,9 +63,11 @@ class ParsingJob:
         print(f"[ParsingJob] Starting HH/SuperJob at {start_time}")
 
         try:
-            # Парсим по популярным запросам и городам
-            queries_to_parse = POPULAR_QUERIES[:10]  # Топ-10 запросов
-            cities_to_parse = POPULAR_CITIES[:5]  # Топ-5 городов
+            # Парсим по случайным запросам и городам (для разнообразия)
+            queries_to_parse = get_random_queries(12)  # 12 случайных запросов
+            cities_to_parse = get_random_cities(8)  # 8 городов (Москва + СПб + 6 случайных)
+            print(f"[ParsingJob] Queries: {queries_to_parse}")
+            print(f"[ParsingJob] Cities: {cities_to_parse}")
 
             for query in queries_to_parse:
                 for city in cities_to_parse:
@@ -175,9 +179,11 @@ class AvitoParsingJob:
         print(f"[AvitoJob] Starting at {start_time}")
 
         try:
-            # Меньше запросов и городов для Avito
-            queries_to_parse = POPULAR_QUERIES[:3]  # Только 3 запроса
-            cities_to_parse = POPULAR_CITIES[:2]    # Только 2 города
+            # Меньше запросов и городов для Avito (щадящий режим)
+            queries_to_parse = get_random_queries(5)  # 5 случайных запросов
+            cities_to_parse = get_random_cities(4)    # 4 города (Москва + СПб + 2 случайных)
+            print(f"[AvitoJob] Queries: {queries_to_parse}")
+            print(f"[AvitoJob] Cities: {cities_to_parse}")
 
             for query in queries_to_parse:
                 for city in cities_to_parse:
