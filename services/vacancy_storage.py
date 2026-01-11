@@ -79,6 +79,7 @@ class VacancyStorageService:
                 # UPSERT с on_conflict
                 response = await client.post(
                     f"{self.base_url}/rest/v1/{self.table}",
+                    params={"on_conflict": "source,source_id"},  # Указываем колонки для UPSERT
                     headers={
                         **self._headers(),
                         "Prefer": "resolution=merge-duplicates",  # UPSERT
