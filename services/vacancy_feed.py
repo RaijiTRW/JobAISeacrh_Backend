@@ -12,6 +12,7 @@ from tools.parsers.hh import HHParser
 from tools.parsers.avito import AvitoParser
 from tools.parsers.superjob import SuperJobParser
 from services.vacancy_storage import vacancy_storage_service
+from services.employer_vacancy_service import employer_vacancy_service
 from config import get_settings
 
 
@@ -55,13 +56,13 @@ class VacancyFeedService:
         )
 
     async def _fetch_from_db(self, filters: FeedFilters) -> tuple[list[Vacancy], int]:
-        """Получить вакансии из БД"""
+        """Получить вакансии из БД (наши + из сети)"""
         try:
             offset = (filters.page - 1) * filters.limit
 
-            # Если есть query — поиск, иначе все вакансии
+            # === 1. Вакансии из сети (hh, avito, superjob) ===
             if filters.query:
-                stored_vacancies, total = await vacancy_storage_service.search_vacancies(
+                stored_vacancies, network_total = await vacancy_storage_service.search_vacancies(
                     query=filters.query,
                     city=filters.city,
                     salary_from=filters.salary_from,
@@ -70,7 +71,7 @@ class VacancyFeedService:
                     offset=offset,
                 )
             else:
-                stored_vacancies, total = await vacancy_storage_service.get_all_vacancies(
+                stored_vacancies, network_total = await vacancy_storage_service.get_all_vacancies(
                     city=filters.city,
                     salary_from=filters.salary_from,
                     experience=filters.experience,
@@ -79,12 +80,32 @@ class VacancyFeedService:
                 )
 
             # Конвертируем в Vacancy
-            vacancies = [
+            network_vacancies = [
                 vacancy_storage_service.to_vacancy(sv)
                 for sv in stored_vacancies
             ]
 
-            return vacancies, total
+            # === 2. Наши вакансии (employer_vacancies) ===
+            employer_vacancies, platform_total = await employer_vacancy_service.get_published_vacancies(
+                query=filters.query,
+                city=filters.city,
+                limit=filters.limit,
+                offset=offset,
+            )
+
+            # Конвертируем employer вакансии в Vacancy формат
+            platform_vacancies = [
+                employer_vacancy_service.to_vacancy(ev)
+                for ev in employer_vacancies
+            ]
+
+            print(f"[Feed] Network: {len(network_vacancies)}, Platform: {len(platform_vacancies)}")
+
+            # === 3. Объединяем (наши вакансии в приоритете — сверху) ===
+            all_vacancies = platform_vacancies + network_vacancies
+            total = network_total + platform_total
+
+            return all_vacancies, total
 
         except Exception as e:
             print(f"[Feed] DB fetch error: {e}")

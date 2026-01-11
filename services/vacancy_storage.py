@@ -165,21 +165,37 @@ class VacancyStorageService:
         """
         Получить все активные вакансии с пагинацией.
         Возвращает (вакансии, общее количество)
+        Поддерживает несколько городов через запятую.
         """
         try:
+            # Парсим города
+            cities = []
+            if city:
+                cities = [c.strip().lower() for c in city.split(",") if c.strip()]
+
+            # Маппинг experience для поиска по разным форматам
+            exp_patterns = self._get_experience_patterns(experience)
+
+            # Если есть фильтр по опыту, получаем больше данных для фильтрации в Python
+            fetch_limit = limit * 10 if exp_patterns else limit
+            fetch_offset = 0 if exp_patterns else offset
+
             params = {
                 "select": "*",
                 "is_active": "eq.true",
                 "order": "created_at.desc",
-                "limit": str(limit),
-                "offset": str(offset),
+                "limit": str(fetch_limit),
+                "offset": str(fetch_offset),
             }
 
-            if city:
-                params["city"] = f"ilike.%{city}%"
-
-            if experience:
-                params["experience"] = f"eq.{experience}"
+            # Поддержка нескольких городов через запятую
+            if cities:
+                if len(cities) == 1:
+                    params["city"] = f"ilike.%{cities[0]}%"
+                else:
+                    # OR запрос для нескольких городов
+                    city_conditions = ",".join([f"city.ilike.%{c}%" for c in cities])
+                    params["or"] = f"({city_conditions})"
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -195,12 +211,24 @@ class VacancyStorageService:
                 # 200 = все данные, 206 = частичные данные (пагинация)
                 if response.status_code in (200, 206):
                     data = response.json()
-                    content_range = response.headers.get("content-range", "")
-                    total = 0
-                    if "/" in content_range:
-                        total = int(content_range.split("/")[1])
-
                     vacancies = [StoredVacancy(**row) for row in data]
+
+                    # Фильтруем по опыту в Python
+                    if exp_patterns:
+                        vacancies = [
+                            v for v in vacancies
+                            if self._matches_experience(v.experience, exp_patterns)
+                        ]
+                        total = len(vacancies)
+                        # Применяем пагинацию
+                        vacancies = vacancies[offset:offset + limit]
+                    else:
+                        # Получаем count из заголовка
+                        content_range = response.headers.get("content-range", "")
+                        total = 0
+                        if "/" in content_range:
+                            total = int(content_range.split("/")[1])
+
                     print(f"[Storage] Got {len(vacancies)} vacancies, total: {total}")
                     return vacancies, total
                 else:
@@ -223,8 +251,17 @@ class VacancyStorageService:
         """
         Полнотекстовый поиск по вакансиям.
         Возвращает (вакансии, общее количество)
+        Поддерживает несколько городов через запятую.
         """
         try:
+            # Парсим города
+            cities = []
+            if city:
+                cities = [c.strip().lower() for c in city.split(",") if c.strip()]
+
+            # Маппинг experience для поиска по разным форматам
+            exp_patterns = self._get_experience_patterns(experience)
+
             async with httpx.AsyncClient() as client:
                 # Получаем вакансии
                 params = {
@@ -232,12 +269,17 @@ class VacancyStorageService:
                     "is_active": "eq.true",
                     "or": f"(title.ilike.%{query}%,description.ilike.%{query}%,company.ilike.%{query}%)",
                     "order": "created_at.desc",
-                    "limit": str(limit),
-                    "offset": str(offset),
                 }
 
-                if city:
-                    params["city"] = f"ilike.%{city}%"
+                # Для одного города добавляем фильтр в запрос
+                if len(cities) == 1:
+                    params["city"] = f"ilike.%{cities[0]}%"
+                    params["limit"] = str(limit)
+                    params["offset"] = str(offset)
+                else:
+                    # Для нескольких городов получаем больше и фильтруем в Python
+                    params["limit"] = str(limit * 5) if cities else str(limit)
+                    params["offset"] = "0" if cities else str(offset)
 
                 response = await client.get(
                     f"{self.base_url}/rest/v1/{self.table}",
@@ -252,13 +294,26 @@ class VacancyStorageService:
                 # 200 = все данные, 206 = частичные данные (пагинация)
                 if response.status_code in (200, 206):
                     data = response.json()
-                    # Получаем count из заголовка
-                    content_range = response.headers.get("content-range", "")
-                    total = 0
-                    if "/" in content_range:
-                        total = int(content_range.split("/")[1])
-
                     vacancies = [StoredVacancy(**row) for row in data]
+
+                    # Фильтруем по нескольким городам в Python
+                    if len(cities) > 1:
+                        vacancies = [
+                            v for v in vacancies
+                            if v.city and any(c in v.city.lower() for c in cities)
+                        ]
+
+                    # Фильтруем по опыту в Python
+                    if exp_patterns:
+                        vacancies = [
+                            v for v in vacancies
+                            if self._matches_experience(v.experience, exp_patterns)
+                        ]
+
+                    total = len(vacancies)
+                    # Применяем пагинацию
+                    vacancies = vacancies[offset:offset + limit]
+
                     return vacancies, total
                 else:
                     print(f"[Storage] Search error: {response.status_code}")
@@ -267,6 +322,43 @@ class VacancyStorageService:
         except Exception as e:
             print(f"[Storage] Search exception: {e}")
             return [], 0
+
+    def _get_experience_patterns(self, experience: Optional[str]) -> list[str]:
+        """
+        Маппинг experience в паттерны для поиска.
+        Разные источники могут хранить опыт в разных форматах.
+        """
+        if not experience:
+            return []
+
+        patterns_map = {
+            "no_experience": [
+                "no_experience", "noexperience", "без опыта", "не требуется",
+                "нет опыта", "without experience", "no experience"
+            ],
+            "1-3": [
+                "1-3", "between1and3", "от 1 до 3", "1 до 3", "1-3 года",
+                "от 1 года до 3 лет", "1–3"
+            ],
+            "3-6": [
+                "3-6", "between3and6", "от 3 до 6", "3 до 6", "3-6 лет",
+                "от 3 лет до 6 лет", "3–6"
+            ],
+            "6+": [
+                "6+", "morethan6", "более 6", "больше 6", "от 6 лет",
+                "more than 6", "6 лет и более"
+            ],
+        }
+
+        return patterns_map.get(experience, [experience])
+
+    def _matches_experience(self, vacancy_exp: Optional[str], patterns: list[str]) -> bool:
+        """Проверить, совпадает ли опыт вакансии с паттернами"""
+        if not vacancy_exp:
+            return False
+
+        vacancy_exp_lower = vacancy_exp.lower()
+        return any(p.lower() in vacancy_exp_lower for p in patterns)
 
     async def get_for_verification(self, limit: int = 100) -> list[StoredVacancy]:
         """

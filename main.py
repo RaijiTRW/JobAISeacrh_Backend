@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from config import get_settings
 from api.routes import chat
 from api.routes import vacancies
+from api.routes import employer_vacancies
 from scheduler import start_scheduler, shutdown_scheduler
 from scheduler.scheduler import (
     get_job_status,
@@ -58,6 +59,7 @@ app.add_middleware(
 # Routes
 app.include_router(chat.router, prefix="/api")
 app.include_router(vacancies.router, prefix="/api/vacancies")
+app.include_router(employer_vacancies.router)
 
 
 @app.get("/")

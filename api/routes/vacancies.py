@@ -5,7 +5,10 @@ from typing import Optional
 from fastapi import APIRouter, Query
 
 from models.feed import FeedFilters, FeedResult
+from models.employer_vacancy import VacancyStats
 from services.vacancy_feed import vacancy_feed_service
+from services.vacancy_storage import vacancy_storage_service
+from services.employer_vacancy_service import employer_vacancy_service
 
 router = APIRouter(tags=["vacancies"])
 
@@ -43,3 +46,25 @@ async def get_vacancy_feed(
 async def vacancies_health():
     """Health check для API вакансий"""
     return {"status": "ok", "service": "vacancies"}
+
+
+@router.get("/stats", response_model=VacancyStats)
+async def get_vacancy_stats():
+    """
+    Получить статистику вакансий:
+    - platform: наши вакансии (созданы на платформе)
+    - network: вакансии из сети (hh, avito, superjob)
+    - total: всего
+    """
+    # Наши вакансии (опубликованные)
+    platform_count = await employer_vacancy_service.get_published_count()
+
+    # Вакансии из сети (из хранилища)
+    network_stats = await vacancy_storage_service.get_stats()
+    network_count = network_stats.get("total", 0)
+
+    return VacancyStats(
+        platform=platform_count,
+        network=network_count,
+        total=platform_count + network_count,
+    )

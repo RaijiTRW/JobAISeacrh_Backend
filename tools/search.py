@@ -1,6 +1,6 @@
 """
 Единый интерфейс поиска вакансий
-Агрегирует результаты из всех источников
+Сначала ищем в БД, если мало — дополняем live-парсингом
 """
 
 import asyncio
@@ -9,11 +9,15 @@ from models.vacancy import Vacancy, SearchFilters, SearchResult
 from tools.parsers.hh import HHParser
 from tools.parsers.avito import AvitoParser
 from tools.parsers.superjob import SuperJobParser
+from services.vacancy_storage import vacancy_storage_service
 from config import get_settings
 
 
 class VacancySearchTool:
     """Единый инструмент поиска вакансий"""
+
+    # Минимальное количество вакансий из БД, после которого не нужен live-поиск
+    MIN_DB_RESULTS = 10
 
     def __init__(self):
         self.settings = get_settings()
@@ -25,13 +29,80 @@ class VacancySearchTool:
 
     async def search(self, filters: SearchFilters) -> SearchResult:
         """
-        Поиск вакансий по всем источникам.
-        HH: все queries параллельно
-        Avito: 3 queries ПОСЛЕДОВАТЕЛЬНО (rate limiting)
-        SuperJob: все queries параллельно
+        Поиск вакансий: сначала БД, потом live-парсинг если мало.
         """
         queries = filters.queries
         print(f"[Search] Searching with {len(queries)} queries: {queries}")
+
+        # === ШАГ 1: Поиск в БД ===
+        db_vacancies = await self._search_db(filters)
+        print(f"[Search] Found {len(db_vacancies)} in DB")
+
+        # Если достаточно результатов из БД — возвращаем их
+        if len(db_vacancies) >= self.MIN_DB_RESULTS:
+            print(f"[Search] Enough results from DB, skipping live search")
+            # Применяем дедупликацию и лимиты
+            processed = self._process_results(db_vacancies, filters)
+            return SearchResult(
+                vacancies=processed,
+                total_found=len(db_vacancies),
+                filters_applied=filters,
+            )
+
+        # === ШАГ 2: Live-парсинг (если БД недостаточно) ===
+        print(f"[Search] Not enough in DB ({len(db_vacancies)}), starting live search...")
+        live_vacancies = await self._search_live(filters)
+        print(f"[Search] Found {len(live_vacancies)} from live search")
+
+        # Сохраняем новые вакансии в БД (в фоне)
+        asyncio.create_task(self._save_to_db(live_vacancies))
+
+        # Объединяем: БД + live (без дубликатов)
+        all_vacancies = self._merge_results(db_vacancies, live_vacancies)
+        print(f"[Search] Total after merge: {len(all_vacancies)}")
+
+        # Применяем дедупликацию и лимиты
+        processed = self._process_results(all_vacancies, filters)
+
+        return SearchResult(
+            vacancies=processed,
+            total_found=len(all_vacancies),
+            filters_applied=filters,
+        )
+
+    async def _search_db(self, filters: SearchFilters) -> list[Vacancy]:
+        """Поиск в базе данных"""
+        all_vacancies = []
+
+        for query in filters.queries[:5]:  # Максимум 5 запросов к БД
+            try:
+                stored, _ = await vacancy_storage_service.search_vacancies(
+                    query=query,
+                    city=filters.city,
+                    salary_from=filters.salary_from,
+                    experience=filters.experience,
+                    limit=30,
+                    offset=0,
+                )
+                for sv in stored:
+                    vacancy = vacancy_storage_service.to_vacancy(sv)
+                    all_vacancies.append(vacancy)
+            except Exception as e:
+                print(f"[Search] DB search error for '{query}': {e}")
+
+        # Дедупликация по ID
+        seen_ids = set()
+        unique = []
+        for v in all_vacancies:
+            if v.id not in seen_ids:
+                seen_ids.add(v.id)
+                unique.append(v)
+
+        return unique
+
+    async def _search_live(self, filters: SearchFilters) -> list[Vacancy]:
+        """Live-парсинг с сайтов"""
+        queries = filters.queries
 
         hh_parser = self.parsers[0]  # HHParser
         avito_parser = self.parsers[1]  # AvitoParser
@@ -89,11 +160,38 @@ class VacancySearchTool:
             elif isinstance(result, Exception):
                 print(f"Parser error: {result}")
 
-        # Удаляем дубликаты по ID и по названию + компании
+        return all_vacancies
+
+    def _merge_results(self, db_vacancies: list[Vacancy], live_vacancies: list[Vacancy]) -> list[Vacancy]:
+        """Объединить результаты из БД и live-поиска без дубликатов"""
+        seen_ids = {v.id for v in db_vacancies}
+        merged = list(db_vacancies)
+
+        for v in live_vacancies:
+            if v.id not in seen_ids:
+                seen_ids.add(v.id)
+                merged.append(v)
+
+        return merged
+
+    async def _save_to_db(self, vacancies: list[Vacancy]) -> None:
+        """Сохранить вакансии в БД (в фоне)"""
+        saved = 0
+        for vacancy in vacancies:
+            try:
+                if await vacancy_storage_service.save_vacancy(vacancy):
+                    saved += 1
+            except Exception as e:
+                print(f"[Search] Save to DB error: {e}")
+        print(f"[Search] Saved {saved}/{len(vacancies)} vacancies to DB")
+
+    def _process_results(self, vacancies: list[Vacancy], filters: SearchFilters) -> list[Vacancy]:
+        """Дедупликация, балансировка и лимиты"""
+        # Дедупликация по ID и ключу
         seen_ids = set()
         seen_keys = set()
         unique_vacancies = []
-        for v in all_vacancies:
+        for v in vacancies:
             if v.id in seen_ids:
                 continue
             key = f"{v.title.lower()}_{v.company.lower()}_{v.city.lower()}"
@@ -103,14 +201,14 @@ class VacancySearchTool:
             seen_keys.add(key)
             unique_vacancies.append(v)
 
-        print(f"[Search] Found {len(all_vacancies)} total, {len(unique_vacancies)} after ID dedupe")
+        print(f"[Search] After ID/key dedupe: {len(unique_vacancies)}")
 
-        # Семантическая дедупликация — группируем похожие названия
+        # Семантическая дедупликация
         unique_vacancies = self._semantic_dedupe(unique_vacancies)
-        print(f"[Search] After semantic dedupe: {len(unique_vacancies)} unique")
+        print(f"[Search] After semantic dedupe: {len(unique_vacancies)}")
 
         # Балансируем источники
-        max_per_source = self.settings.max_total_vacancies // 3 + 5  # ~25 с каждого источника
+        max_per_source = self.settings.max_total_vacancies // 3 + 5
         by_source = {"hh": [], "avito": [], "superjob": []}
         for v in unique_vacancies:
             if v.source in by_source:
@@ -125,10 +223,10 @@ class VacancySearchTool:
 
         # Берём до max_per_source из каждого источника
         balanced = []
-        for source, vacancies in by_source.items():
-            taken = vacancies[:max_per_source]
+        for source, source_vacancies in by_source.items():
+            taken = source_vacancies[:max_per_source]
             balanced.extend(taken)
-            print(f"[Search] Source {source}: {len(vacancies)} total, took {len(taken)}")
+            print(f"[Search] Source {source}: {len(source_vacancies)} total, took {len(taken)}")
 
         # Финальная сортировка по зарплате
         balanced.sort(
@@ -137,13 +235,7 @@ class VacancySearchTool:
         )
 
         # Ограничиваем количество
-        limited = balanced[:self.settings.max_total_vacancies]
-
-        return SearchResult(
-            vacancies=limited,
-            total_found=len(unique_vacancies),
-            filters_applied=filters,
-        )
+        return balanced[:self.settings.max_total_vacancies]
 
     def _semantic_dedupe(self, vacancies: list[Vacancy]) -> list[Vacancy]:
         """
