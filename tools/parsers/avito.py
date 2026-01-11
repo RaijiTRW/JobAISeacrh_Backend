@@ -23,6 +23,8 @@ class AvitoParser(BaseParser):
     _retry_count = 0  # Для exponential backoff
     _proxy_list: list[str] = []
     _proxy_index = 0
+    _blocked_until = 0  # Timestamp когда можно снова делать запросы
+    _consecutive_429 = 0  # Счётчик подряд идущих 429
 
     # Варианты сортировки для retry
     SORT_OPTIONS = [

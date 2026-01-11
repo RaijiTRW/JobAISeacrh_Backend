@@ -9,6 +9,13 @@ from contextlib import asynccontextmanager
 
 from config import get_settings
 from api.routes import chat
+from api.routes import vacancies
+from scheduler import start_scheduler, shutdown_scheduler
+from scheduler.scheduler import (
+    get_job_status,
+    trigger_parsing_now,
+    trigger_verification_now,
+)
 
 
 @asynccontextmanager
@@ -19,8 +26,15 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     print(f"   Model: {settings.model_name}")
     print(f"   Debug: {settings.debug}")
+
+    # Start scheduler
+    start_scheduler()
+    print("📅 Scheduler started")
+
     yield
+
     # Shutdown
+    shutdown_scheduler()
     print("👋 Shutting down...")
 
 
@@ -43,6 +57,7 @@ app.add_middleware(
 
 # Routes
 app.include_router(chat.router, prefix="/api")
+app.include_router(vacancies.router, prefix="/api/vacancies")
 
 
 @app.get("/")
@@ -57,6 +72,27 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+# Scheduler endpoints
+@app.get("/api/scheduler/status")
+async def scheduler_status():
+    """Получить статус scheduler и jobs"""
+    return get_job_status()
+
+
+@app.post("/api/scheduler/parse")
+async def manual_parse():
+    """Запустить парсинг вручную"""
+    stats = await trigger_parsing_now()
+    return stats
+
+
+@app.post("/api/scheduler/verify")
+async def manual_verify():
+    """Запустить верификацию вручную"""
+    stats = await trigger_verification_now()
+    return stats
 
 
 if __name__ == "__main__":
