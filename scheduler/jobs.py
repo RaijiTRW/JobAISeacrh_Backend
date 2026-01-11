@@ -28,20 +28,20 @@ from scheduler.human_behavior import (
 
 class ParsingJob:
     """
-    Job для парсинга вакансий.
+    Job для парсинга вакансий с HH и SuperJob.
     Запускается каждые 2 часа.
+    Avito парсится отдельно каждые 4 часа.
     """
 
     def __init__(self):
         self.settings = get_settings()
         self.hh_parser = HHParser()
-        self.avito_parser = AvitoParser()
         self.sj_parser = SuperJobParser()
         self.is_running = False
 
     async def run(self) -> dict:
         """
-        Запустить полный цикл парсинга.
+        Запустить парсинг HH и SuperJob.
         Возвращает статистику.
         """
         if self.is_running:
@@ -53,13 +53,12 @@ class ParsingJob:
         stats = {
             "started_at": start_time.isoformat(),
             "hh": {"parsed": 0, "saved": 0},
-            "avito": {"parsed": 0, "saved": 0},
             "superjob": {"parsed": 0, "saved": 0},
             "total_saved": 0,
             "errors": [],
         }
 
-        print(f"[ParsingJob] Starting at {start_time}")
+        print(f"[ParsingJob] Starting HH/SuperJob at {start_time}")
 
         try:
             # Парсим по популярным запросам и городам
@@ -98,23 +97,7 @@ class ParsingJob:
                 # Перерыв между запросами
                 await session_break()
 
-            # Avito парсим отдельно и очень аккуратно
-            print("[ParsingJob] Starting Avito parsing (careful mode)...")
-            try:
-                avito_stats = await self._parse_avito_careful(
-                    queries_to_parse[:5],  # Только 5 запросов для Avito
-                    cities_to_parse[:3],   # Только 3 города
-                )
-                stats["avito"] = avito_stats
-            except Exception as e:
-                stats["errors"].append(f"Avito: {str(e)}")
-                print(f"[ParsingJob] Avito error: {e}")
-
-            stats["total_saved"] = (
-                stats["hh"]["saved"] +
-                stats["avito"]["saved"] +
-                stats["superjob"]["saved"]
-            )
+            stats["total_saved"] = stats["hh"]["saved"] + stats["superjob"]["saved"]
 
         except Exception as e:
             stats["errors"].append(f"General: {str(e)}")
@@ -161,42 +144,79 @@ class ParsingJob:
 
         return stats
 
-    async def _parse_avito_careful(
-        self,
-        queries: list[str],
-        cities: list[str],
-    ) -> dict:
+class AvitoParsingJob:
+    """
+    Отдельный job для парсинга Avito.
+    Запускается каждые 4 часа с увеличенными задержками.
+    """
+
+    def __init__(self):
+        self.settings = get_settings()
+        self.avito_parser = AvitoParser()
+        self.is_running = False
+
+    async def run(self) -> dict:
         """
-        Очень осторожный парсинг Avito.
-        Большие задержки, маленькие батчи.
+        Запустить парсинг Avito в щадящем режиме.
         """
-        stats = {"parsed": 0, "saved": 0}
-        session = HumanSession("avito")
+        if self.is_running:
+            print("[AvitoJob] Already running, skipping...")
+            return {"status": "skipped", "reason": "already_running"}
 
-        for query in queries:
-            for city in cities:
-                try:
-                    await session.before_request()
+        self.is_running = True
+        start_time = datetime.now()
+        stats = {
+            "started_at": start_time.isoformat(),
+            "parsed": 0,
+            "saved": 0,
+            "errors": [],
+        }
 
-                    filters = SearchFilters(query=query, city=city)
-                    vacancies = await self.avito_parser.search(filters, limit=5)
-                    stats["parsed"] += len(vacancies)
+        print(f"[AvitoJob] Starting at {start_time}")
 
-                    for vacancy in vacancies:
-                        if await vacancy_storage_service.save_vacancy(vacancy):
-                            stats["saved"] += 1
+        try:
+            # Меньше запросов и городов для Avito
+            queries_to_parse = POPULAR_QUERIES[:3]  # Только 3 запроса
+            cities_to_parse = POPULAR_CITIES[:2]    # Только 2 города
 
-                    # Большая задержка после каждого запроса Avito
-                    await human_delay(source="avito")
+            for query in queries_to_parse:
+                for city in cities_to_parse:
+                    try:
+                        print(f"[AvitoJob] Parsing: {query} in {city}")
 
-                except Exception as e:
-                    print(f"[ParsingJob] Avito error for {query}/{city}: {e}")
-                    # При ошибке делаем очень большую паузу
-                    await asyncio.sleep(120)
+                        filters = SearchFilters(query=query, city=city)
+                        vacancies = await self.avito_parser.search(filters, limit=10)
+                        stats["parsed"] += len(vacancies)
 
-            # Перерыв между запросами
-            await asyncio.sleep(60)
+                        for vacancy in vacancies:
+                            if await vacancy_storage_service.save_vacancy(vacancy):
+                                stats["saved"] += 1
 
+                        # Большая задержка после каждого запроса (30-60 сек)
+                        delay = 30 + (asyncio.get_event_loop().time() % 30)
+                        print(f"[AvitoJob] Waiting {delay:.0f}s before next request...")
+                        await asyncio.sleep(delay)
+
+                    except Exception as e:
+                        print(f"[AvitoJob] Error for {query}/{city}: {e}")
+                        stats["errors"].append(f"{query}/{city}: {str(e)}")
+                        # При ошибке ждём 3 минуты
+                        await asyncio.sleep(180)
+
+                # Перерыв между запросами (2-3 минуты)
+                await asyncio.sleep(120 + (asyncio.get_event_loop().time() % 60))
+
+        except Exception as e:
+            stats["errors"].append(f"General: {str(e)}")
+            print(f"[AvitoJob] General error: {e}")
+
+        finally:
+            self.is_running = False
+            end_time = datetime.now()
+            stats["ended_at"] = end_time.isoformat()
+            stats["duration_seconds"] = (end_time - start_time).total_seconds()
+
+        print(f"[AvitoJob] Finished. Stats: {stats}")
         return stats
 
 
@@ -324,12 +344,18 @@ class VerificationJob:
 
 # Singleton instances
 parsing_job = ParsingJob()
+avito_job = AvitoParsingJob()
 verification_job = VerificationJob()
 
 
 async def run_parsing():
-    """Wrapper для запуска парсинга"""
+    """Wrapper для запуска парсинга HH/SuperJob"""
     return await parsing_job.run()
+
+
+async def run_avito_parsing():
+    """Wrapper для запуска парсинга Avito"""
+    return await avito_job.run()
 
 
 async def run_verification():

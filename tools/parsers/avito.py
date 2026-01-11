@@ -172,10 +172,13 @@ class AvitoParser(BaseParser):
                 raise Exception("403 Forbidden")
 
             elif response.status_code == 429:
-                backoff = 15.0 * (2 ** AvitoParser._retry_count)
-                print(f"[Avito] 429 Rate limited, backoff {backoff:.1f}s")
+                # Увеличенный backoff: 60 сек * 2^retry (60, 120, 240, ...)
+                backoff = 60.0 * (2 ** AvitoParser._retry_count)
+                backoff = min(backoff, 600)  # Максимум 10 минут
+                print(f"[Avito] 429 Rate limited, backoff {backoff:.0f}s")
                 AvitoParser._last_request_time = time.time() + backoff
-                raise Exception("429 Rate limited")
+                AvitoParser._retry_count += 1
+                raise Exception(f"429 Rate limited, wait {backoff:.0f}s")
 
         return vacancies
 

@@ -1,6 +1,8 @@
 """
 APScheduler настройка и управление
-Парсинг каждые 2 часа, верификация каждый час
+- HH/SuperJob: каждые 2 часа
+- Avito: каждые 4 часа (щадящий режим)
+- Верификация: каждый час
 """
 
 import asyncio
@@ -9,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 
-from scheduler.jobs import run_parsing, run_verification
+from scheduler.jobs import run_parsing, run_avito_parsing, run_verification
 from scheduler.human_behavior import is_working_hours
 
 
@@ -49,6 +51,23 @@ async def parsing_job_wrapper():
         print(f"[Scheduler] Parsing error: {e}")
 
 
+async def avito_job_wrapper():
+    """
+    Wrapper для парсинга Avito (отдельно от остальных).
+    Запускается реже — каждые 4 часа.
+    """
+    if not is_working_hours():
+        print(f"[Scheduler] Skipping Avito parsing - outside working hours")
+        return
+
+    print(f"[Scheduler] Starting Avito parsing job at {datetime.now()}")
+    try:
+        stats = await run_avito_parsing()
+        print(f"[Scheduler] Avito completed: {stats.get('saved', 0)} vacancies saved")
+    except Exception as e:
+        print(f"[Scheduler] Avito error: {e}")
+
+
 async def verification_job_wrapper():
     """Wrapper для верификации"""
     print(f"[Scheduler] Starting verification job at {datetime.now()}")
@@ -63,12 +82,21 @@ def start_scheduler():
     """Запустить scheduler с jobs"""
     sched = get_scheduler()
 
-    # Парсинг каждые 2 часа (в рабочее время)
+    # Парсинг HH/SuperJob каждые 2 часа (в рабочее время)
     sched.add_job(
         parsing_job_wrapper,
         trigger=IntervalTrigger(hours=2),
         id="parsing_job",
-        name="Vacancy Parsing",
+        name="HH/SuperJob Parsing",
+        replace_existing=True,
+    )
+
+    # Парсинг Avito каждые 4 часа (щадящий режим)
+    sched.add_job(
+        avito_job_wrapper,
+        trigger=IntervalTrigger(hours=4),
+        id="avito_job",
+        name="Avito Parsing",
         replace_existing=True,
     )
 
