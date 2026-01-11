@@ -191,7 +191,8 @@ class VacancyStorageService:
                     timeout=15.0,
                 )
 
-                if response.status_code == 200:
+                # 200 = все данные, 206 = частичные данные (пагинация)
+                if response.status_code in (200, 206):
                     data = response.json()
                     content_range = response.headers.get("content-range", "")
                     total = 0
@@ -199,6 +200,7 @@ class VacancyStorageService:
                         total = int(content_range.split("/")[1])
 
                     vacancies = [StoredVacancy(**row) for row in data]
+                    print(f"[Storage] Got {len(vacancies)} vacancies, total: {total}")
                     return vacancies, total
                 else:
                     print(f"[Storage] Get all error: {response.status_code}")
@@ -246,7 +248,8 @@ class VacancyStorageService:
                     timeout=15.0,
                 )
 
-                if response.status_code == 200:
+                # 200 = все данные, 206 = частичные данные (пагинация)
+                if response.status_code in (200, 206):
                     data = response.json()
                     # Получаем count из заголовка
                     content_range = response.headers.get("content-range", "")
@@ -344,7 +347,7 @@ class VacancyStorageService:
                     timeout=10.0,
                 )
                 active_count = 0
-                if "content-range" in active_resp.headers:
+                if active_resp.status_code in (200, 206) and "content-range" in active_resp.headers:
                     active_count = int(active_resp.headers["content-range"].split("/")[1])
 
                 # Неактивные
@@ -355,7 +358,7 @@ class VacancyStorageService:
                     timeout=10.0,
                 )
                 inactive_count = 0
-                if "content-range" in inactive_resp.headers:
+                if inactive_resp.status_code in (200, 206) and "content-range" in inactive_resp.headers:
                     inactive_count = int(inactive_resp.headers["content-range"].split("/")[1])
 
                 return {
