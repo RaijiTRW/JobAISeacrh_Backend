@@ -7,6 +7,47 @@ import random
 import asyncio
 from datetime import datetime, time
 from typing import Optional
+from geonamescache import GeonamesCache
+
+
+# Загружаем все города России из geonamescache
+def _load_russian_cities() -> list[str]:
+    """Загрузить все города России из geonamescache"""
+    try:
+        gc = GeonamesCache()
+        cities = gc.get_cities()
+
+        # Собираем города России с населением
+        cities_with_pop = [
+            (city['name'], city.get('population', 0))
+            for city in cities.values()
+            if city['countrycode'] == 'RU'
+        ]
+
+        # Сортируем по населению (крупные города первыми)
+        cities_with_pop.sort(key=lambda x: x[1], reverse=True)
+        result = [name for name, _ in cities_with_pop]
+
+        # Если список пустой или слишком маленький, используем fallback
+        if len(result) < 100:
+            return _fallback_cities()
+
+        return result
+    except Exception as e:
+        print(f"[HumanBehavior] Error loading cities from geonamescache: {e}")
+        return _fallback_cities()
+
+
+def _fallback_cities() -> list[str]:
+    """Fallback список крупных городов если geonamescache не работает"""
+    return [
+        "Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань",
+        "Нижний Новгород", "Челябинск", "Самара", "Омск", "Ростов-на-Дону",
+        "Уфа", "Красноярск", "Воронеж", "Пермь", "Волгоград", "Краснодар",
+        "Саратов", "Тюмень", "Тольятти", "Ижевск", "Барнаул", "Иркутск",
+        "Хабаровск", "Владивосток", "Ярославль", "Томск", "Оренбург",
+        "Кемерово", "Рязань", "Астрахань", "Новороссийск", "Сочи",
+    ]
 
 
 # User-Agent'ы реальных браузеров
@@ -81,39 +122,9 @@ POPULAR_QUERIES = [
     "экономист",
 ]
 
-# Популярные города (все крупные города РФ)
-POPULAR_CITIES = [
-    "Москва",
-    "Санкт-Петербург",
-    "Новосибирск",
-    "Екатеринбург",
-    "Казань",
-    "Нижний Новгород",
-    "Челябинск",
-    "Самара",
-    "Омск",
-    "Ростов-на-Дону",
-    "Уфа",
-    "Красноярск",
-    "Воронеж",
-    "Пермь",
-    "Волгоград",
-    "Краснодар",
-    "Саратов",
-    "Тюмень",
-    "Тольятти",
-    "Ижевск",
-    "Барнаул",
-    "Иркутск",
-    "Хабаровск",
-    "Владивосток",
-    "Ярославль",
-    "Томск",
-    "Оренбург",
-    "Кемерово",
-    "Рязань",
-    "Астрахань",
-]
+# Все города России из geonamescache (отсортированы по населению)
+POPULAR_CITIES = _load_russian_cities()
+print(f"[HumanBehavior] Loaded {len(POPULAR_CITIES)} Russian cities")
 
 
 def get_random_queries(count: int = 10) -> list[str]:
