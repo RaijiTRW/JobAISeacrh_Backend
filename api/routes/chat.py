@@ -20,6 +20,7 @@ def json_serializer(obj):
 from models.chat import ChatRequest, ChatResponse, UserPreferences
 from agents.orchestrator import orchestrator
 from services.user_profile import user_profile_service
+from services.subscription_service import subscription_service
 from config import get_settings
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -45,6 +46,11 @@ async def send_message(request: ChatMessageRequest):
     """
     Отправка сообщения в чат
     """
+    # Проверяем лимит запросов
+    can_use, limit_message = await subscription_service.check_and_use_request(request.user_id)
+    if not can_use:
+        raise HTTPException(status_code=402, detail=limit_message)
+
     # Получаем или создаём сессию
     session_key = f"{request.user_id}_{request.chat_id or 'new'}"
 
@@ -103,6 +109,11 @@ async def send_message_stream(request: ChatMessageRequest):
     """
     Отправка сообщения со стримингом ответа
     """
+    # Проверяем лимит запросов
+    can_use, limit_message = await subscription_service.check_and_use_request(request.user_id)
+    if not can_use:
+        raise HTTPException(status_code=402, detail=limit_message)
+
     session_key = f"{request.user_id}_{request.chat_id or 'new'}"
 
     if session_key not in sessions:

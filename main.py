@@ -14,6 +14,7 @@ from api.routes import employer_vacancies
 from api.routes import admin
 from api.routes import conversations
 from api.routes import scheduler as scheduler_routes
+from api.routes import subscription
 from scheduler import start_scheduler, shutdown_scheduler
 
 
@@ -61,6 +62,7 @@ app.include_router(employer_vacancies.router)
 app.include_router(admin.router)
 app.include_router(conversations.router)
 app.include_router(scheduler_routes.router)
+app.include_router(subscription.router)  # Подписки и платежи
 
 
 @app.get("/")

@@ -29,6 +29,19 @@ class Settings(BaseSettings):
     # Можно указать несколько через запятую для ротации
     proxy_urls: str = ""  # Пустая строка = прокси отключены
 
+    # YooKassa настройки
+    yookassa_shop_id: str = ""
+    yookassa_secret_key: str = ""
+    yookassa_return_url: str = "http://localhost:3000/subscription/success"
+
+    # Подписки
+    subscription_price: int = 799  # рублей в месяц
+    extra_requests_price: int = 99  # рублей за пакет
+    extra_requests_count: int = 10  # запросов в пакете
+    trial_days: int = 3
+    trial_daily_limit: int = 3
+    pro_daily_limit: int = 10
+
     class Config:
         env_file = ".env"
 

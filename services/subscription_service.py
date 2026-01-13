@@ -1,0 +1,453 @@
+"""
+Subscription Service - управление подписками и лимитами запросов
+"""
+import httpx
+from datetime import datetime, timedelta, date
+from typing import Optional
+from pydantic import BaseModel
+
+from config import get_settings
+
+
+class SubscriptionInfo(BaseModel):
+    """Информация о подписке"""
+    plan: str  # trial, pro
+    status: str  # active, expired, cancelled
+    expires_at: str
+    days_left: int
+    started_at: Optional[str] = None
+
+
+class RequestLimits(BaseModel):
+    """Лимиты запросов пользователя"""
+    daily_limit: int
+    daily_used: int
+    bonus_requests: int
+    can_use: bool
+    remaining: int  # daily_limit - daily_used + bonus_requests
+
+
+class SubscriptionStatus(BaseModel):
+    """Полный статус подписки пользователя"""
+    subscription: Optional[SubscriptionInfo] = None
+    limits: RequestLimits
+    is_trial_expired: bool
+    is_pro: bool
+
+
+class SubscriptionService:
+    """Сервис для управления подписками и лимитами"""
+
+    def __init__(self):
+        self.settings = get_settings()
+        self.base_url = self.settings.supabase_url
+        self.api_key = self.settings.supabase_key
+
+    def _headers(self) -> dict:
+        return {
+            "apikey": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+
+    async def get_subscription(self, user_id: str) -> Optional[SubscriptionInfo]:
+        """Получить информацию о подписке пользователя"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/rest/v1/user_subscriptions",
+                    params={
+                        "user_id": f"eq.{user_id}",
+                        "select": "*",
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and len(data) > 0:
+                        sub = data[0]
+                        expires_at = datetime.fromisoformat(sub["expires_at"].replace("Z", "+00:00"))
+                        now = datetime.now(expires_at.tzinfo)
+                        days_left = max(0, (expires_at - now).days)
+
+                        return SubscriptionInfo(
+                            plan=sub["plan"],
+                            status=sub["status"],
+                            expires_at=sub["expires_at"],
+                            days_left=days_left,
+                            started_at=sub.get("started_at"),
+                        )
+                return None
+        except Exception as e:
+            print(f"[Subscription] get_subscription error: {e}")
+            return None
+
+    async def get_limits(self, user_id: str) -> RequestLimits:
+        """Получить лимиты запросов пользователя"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/rest/v1/user_request_limits",
+                    params={
+                        "user_id": f"eq.{user_id}",
+                        "select": "*",
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and len(data) > 0:
+                        limits = data[0]
+                        daily_limit = limits["daily_limit"]
+                        daily_used = limits["daily_used"]
+                        bonus = limits["bonus_requests"]
+
+                        # Проверяем, нужно ли сбросить дневные лимиты
+                        reset_date = date.fromisoformat(limits["daily_reset_at"])
+                        if reset_date < date.today():
+                            # Сбрасываем лимиты
+                            await self._reset_user_daily_limits(user_id)
+                            daily_used = 0
+
+                        remaining = max(0, daily_limit - daily_used) + bonus
+                        can_use = remaining > 0
+
+                        return RequestLimits(
+                            daily_limit=daily_limit,
+                            daily_used=daily_used,
+                            bonus_requests=bonus,
+                            can_use=can_use,
+                            remaining=remaining,
+                        )
+
+            # Дефолтные лимиты если записи нет
+            return RequestLimits(
+                daily_limit=0,
+                daily_used=0,
+                bonus_requests=0,
+                can_use=False,
+                remaining=0,
+            )
+        except Exception as e:
+            print(f"[Subscription] get_limits error: {e}")
+            return RequestLimits(
+                daily_limit=0,
+                daily_used=0,
+                bonus_requests=0,
+                can_use=False,
+                remaining=0,
+            )
+
+    async def get_full_status(self, user_id: str) -> SubscriptionStatus:
+        """Получить полный статус подписки и лимитов"""
+        subscription = await self.get_subscription(user_id)
+        limits = await self.get_limits(user_id)
+
+        is_trial_expired = False
+        is_pro = False
+
+        if subscription:
+            is_pro = subscription.plan == "pro" and subscription.status == "active"
+            is_trial_expired = (
+                subscription.plan == "trial"
+                and (subscription.status == "expired" or subscription.days_left <= 0)
+            )
+
+        return SubscriptionStatus(
+            subscription=subscription,
+            limits=limits,
+            is_trial_expired=is_trial_expired,
+            is_pro=is_pro,
+        )
+
+    async def check_and_use_request(self, user_id: str) -> tuple[bool, str]:
+        """
+        Проверить лимит и использовать запрос.
+        Возвращает (can_use, message)
+        """
+        try:
+            # Получаем статус
+            status = await self.get_full_status(user_id)
+
+            # Проверяем подписку
+            if status.is_trial_expired:
+                return False, "Пробный период закончился. Оформите подписку Pro."
+
+            if not status.subscription:
+                return False, "Подписка не найдена. Пожалуйста, зарегистрируйтесь."
+
+            if status.subscription.status == "expired":
+                return False, "Подписка истекла. Продлите подписку Pro."
+
+            if status.subscription.status == "cancelled":
+                return False, "Подписка отменена. Оформите новую подписку."
+
+            # Проверяем лимиты
+            if not status.limits.can_use:
+                return False, "Лимит запросов исчерпан. Докупите запросы или подождите до завтра."
+
+            # Используем запрос
+            await self._use_request(user_id, status.limits)
+            return True, "OK"
+
+        except Exception as e:
+            print(f"[Subscription] check_and_use_request error: {e}")
+            return False, f"Ошибка проверки лимитов: {str(e)}"
+
+    async def _use_request(self, user_id: str, limits: RequestLimits) -> None:
+        """Использовать один запрос"""
+        try:
+            async with httpx.AsyncClient() as client:
+                # Сначала используем дневные лимиты
+                if limits.daily_used < limits.daily_limit:
+                    await client.patch(
+                        f"{self.base_url}/rest/v1/user_request_limits",
+                        params={"user_id": f"eq.{user_id}"},
+                        json={
+                            "daily_used": limits.daily_used + 1,
+                            "updated_at": datetime.utcnow().isoformat(),
+                        },
+                        headers=self._headers(),
+                        timeout=10.0,
+                    )
+                # Иначе используем бонусные
+                elif limits.bonus_requests > 0:
+                    await client.patch(
+                        f"{self.base_url}/rest/v1/user_request_limits",
+                        params={"user_id": f"eq.{user_id}"},
+                        json={
+                            "bonus_requests": limits.bonus_requests - 1,
+                            "updated_at": datetime.utcnow().isoformat(),
+                        },
+                        headers=self._headers(),
+                        timeout=10.0,
+                    )
+        except Exception as e:
+            print(f"[Subscription] _use_request error: {e}")
+
+    async def _reset_user_daily_limits(self, user_id: str) -> None:
+        """Сбросить дневные лимиты пользователя"""
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.patch(
+                    f"{self.base_url}/rest/v1/user_request_limits",
+                    params={"user_id": f"eq.{user_id}"},
+                    json={
+                        "daily_used": 0,
+                        "daily_reset_at": date.today().isoformat(),
+                        "updated_at": datetime.utcnow().isoformat(),
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+        except Exception as e:
+            print(f"[Subscription] _reset_user_daily_limits error: {e}")
+
+    async def activate_pro(self, user_id: str, payment_id: str) -> bool:
+        """Активировать Pro подписку после оплаты"""
+        try:
+            async with httpx.AsyncClient() as client:
+                now = datetime.utcnow()
+                expires_at = now + timedelta(days=30)
+
+                # Обновляем подписку
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/user_subscriptions",
+                    params={"user_id": f"eq.{user_id}"},
+                    json={
+                        "plan": "pro",
+                        "status": "active",
+                        "started_at": now.isoformat(),
+                        "expires_at": expires_at.isoformat(),
+                        "yookassa_payment_id": payment_id,
+                        "updated_at": now.isoformat(),
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                if response.status_code not in [200, 204]:
+                    print(f"[Subscription] activate_pro subscription update failed: {response.text}")
+                    return False
+
+                # Обновляем лимиты
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/user_request_limits",
+                    params={"user_id": f"eq.{user_id}"},
+                    json={
+                        "daily_limit": self.settings.pro_daily_limit,
+                        "daily_used": 0,
+                        "daily_reset_at": date.today().isoformat(),
+                        "updated_at": now.isoformat(),
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                return response.status_code in [200, 204]
+
+        except Exception as e:
+            print(f"[Subscription] activate_pro error: {e}")
+            return False
+
+    async def add_bonus_requests(self, user_id: str, count: int) -> bool:
+        """Добавить бонусные запросы после покупки"""
+        try:
+            # Сначала получаем текущие бонусы
+            limits = await self.get_limits(user_id)
+
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/user_request_limits",
+                    params={"user_id": f"eq.{user_id}"},
+                    json={
+                        "bonus_requests": limits.bonus_requests + count,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                return response.status_code in [200, 204]
+
+        except Exception as e:
+            print(f"[Subscription] add_bonus_requests error: {e}")
+            return False
+
+    async def create_trial(self, user_id: str) -> bool:
+        """Создать триал подписку для нового пользователя"""
+        try:
+            async with httpx.AsyncClient() as client:
+                now = datetime.utcnow()
+                expires_at = now + timedelta(days=self.settings.trial_days)
+
+                # Создаём подписку
+                response = await client.post(
+                    f"{self.base_url}/rest/v1/user_subscriptions",
+                    json={
+                        "user_id": user_id,
+                        "plan": "trial",
+                        "status": "active",
+                        "started_at": now.isoformat(),
+                        "expires_at": expires_at.isoformat(),
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                if response.status_code not in [200, 201]:
+                    print(f"[Subscription] create_trial subscription failed: {response.text}")
+                    return False
+
+                # Создаём лимиты
+                response = await client.post(
+                    f"{self.base_url}/rest/v1/user_request_limits",
+                    json={
+                        "user_id": user_id,
+                        "daily_limit": self.settings.trial_daily_limit,
+                        "daily_used": 0,
+                        "daily_reset_at": date.today().isoformat(),
+                        "bonus_requests": 0,
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                return response.status_code in [200, 201]
+
+        except Exception as e:
+            print(f"[Subscription] create_trial error: {e}")
+            return False
+
+    async def save_payment(
+        self,
+        user_id: str,
+        payment_type: str,
+        amount: float,
+        status: str,
+        yookassa_payment_id: str,
+        metadata: dict = None,
+    ) -> bool:
+        """Сохранить информацию о платеже"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/rest/v1/payment_history",
+                    json={
+                        "user_id": user_id,
+                        "type": payment_type,
+                        "amount": amount,
+                        "currency": "RUB",
+                        "status": status,
+                        "yookassa_payment_id": yookassa_payment_id,
+                        "metadata": metadata or {},
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                return response.status_code in [200, 201]
+
+        except Exception as e:
+            print(f"[Subscription] save_payment error: {e}")
+            return False
+
+    async def update_payment_status(
+        self,
+        yookassa_payment_id: str,
+        status: str,
+        yookassa_status: str = None,
+    ) -> bool:
+        """Обновить статус платежа"""
+        try:
+            async with httpx.AsyncClient() as client:
+                data = {"status": status}
+                if yookassa_status:
+                    data["yookassa_status"] = yookassa_status
+
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/payment_history",
+                    params={"yookassa_payment_id": f"eq.{yookassa_payment_id}"},
+                    json=data,
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                return response.status_code in [200, 204]
+
+        except Exception as e:
+            print(f"[Subscription] update_payment_status error: {e}")
+            return False
+
+    async def get_payment_by_id(self, yookassa_payment_id: str) -> Optional[dict]:
+        """Получить платёж по ID YooKassa"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/rest/v1/payment_history",
+                    params={
+                        "yookassa_payment_id": f"eq.{yookassa_payment_id}",
+                        "select": "*",
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and len(data) > 0:
+                        return data[0]
+                return None
+
+        except Exception as e:
+            print(f"[Subscription] get_payment_by_id error: {e}")
+            return None
+
+
+# Синглтон
+subscription_service = SubscriptionService()
