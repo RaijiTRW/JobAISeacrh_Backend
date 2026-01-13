@@ -15,6 +15,7 @@ from api.routes import admin
 from api.routes import conversations
 from api.routes import scheduler as scheduler_routes
 from api.routes import subscription
+from api.routes import support
 from scheduler import start_scheduler, shutdown_scheduler
 
 
@@ -63,6 +64,7 @@ app.include_router(admin.router)
 app.include_router(conversations.router)
 app.include_router(scheduler_routes.router)
 app.include_router(subscription.router)  # Подписки и платежи
+app.include_router(support.router)  # AI чат и поддержка
 
 
 @app.get("/")
