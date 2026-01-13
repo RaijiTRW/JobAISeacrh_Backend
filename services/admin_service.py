@@ -264,17 +264,93 @@ class AdminService:
         """Установить подписку пользователю"""
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.patch(
-                    f"{self.base_url}/rest/v1/profiles",
-                    params={"user_id": f"eq.{user_id}"},
-                    headers=self._headers(),
-                    json={
-                        "subscription_type": subscription_type,
-                        "subscription_expires_at": expires_at,
-                    },
-                    timeout=10.0,
-                )
-                return response.status_code in (200, 204)
+                # Определяем параметры подписки
+                if subscription_type == "trial":
+                    daily_limit = 3
+                    days = 3
+                elif subscription_type == "pro":
+                    daily_limit = 10
+                    days = 30
+                else:
+                    # Удалить подписку
+                    daily_limit = 0
+                    days = 0
+
+                if subscription_type:
+                    # Вычисляем дату окончания
+                    calc_expires_at = expires_at or (datetime.utcnow() + timedelta(days=days)).isoformat()
+
+                    # Upsert в user_subscriptions
+                    sub_response = await client.post(
+                        f"{self.base_url}/rest/v1/user_subscriptions",
+                        headers={**self._headers(), "Prefer": "resolution=merge-duplicates"},
+                        json={
+                            "user_id": user_id,
+                            "plan": subscription_type,
+                            "status": "active",
+                            "started_at": datetime.utcnow().isoformat(),
+                            "expires_at": calc_expires_at,
+                            "updated_at": datetime.utcnow().isoformat(),
+                        },
+                        timeout=10.0,
+                    )
+                    print(f"[Admin] user_subscriptions upsert: {sub_response.status_code}")
+
+                    # Upsert в user_request_limits
+                    limits_response = await client.post(
+                        f"{self.base_url}/rest/v1/user_request_limits",
+                        headers={**self._headers(), "Prefer": "resolution=merge-duplicates"},
+                        json={
+                            "user_id": user_id,
+                            "daily_limit": daily_limit,
+                            "daily_used": 0,
+                            "daily_reset_at": datetime.utcnow().strftime("%Y-%m-%d"),
+                            "bonus_requests": 0,
+                            "updated_at": datetime.utcnow().isoformat(),
+                        },
+                        timeout=10.0,
+                    )
+                    print(f"[Admin] user_request_limits upsert: {limits_response.status_code}")
+
+                    # Также обновляем profiles для отображения в админке
+                    await client.patch(
+                        f"{self.base_url}/rest/v1/profiles",
+                        params={"user_id": f"eq.{user_id}"},
+                        headers=self._headers(),
+                        json={
+                            "subscription_type": subscription_type,
+                            "subscription_expires_at": calc_expires_at,
+                        },
+                        timeout=10.0,
+                    )
+
+                    return sub_response.status_code in (200, 201, 204) and limits_response.status_code in (200, 201, 204)
+                else:
+                    # Удалить подписку
+                    await client.delete(
+                        f"{self.base_url}/rest/v1/user_subscriptions",
+                        params={"user_id": f"eq.{user_id}"},
+                        headers=self._headers(),
+                        timeout=10.0,
+                    )
+                    await client.delete(
+                        f"{self.base_url}/rest/v1/user_request_limits",
+                        params={"user_id": f"eq.{user_id}"},
+                        headers=self._headers(),
+                        timeout=10.0,
+                    )
+                    # Очищаем поле в profiles
+                    await client.patch(
+                        f"{self.base_url}/rest/v1/profiles",
+                        params={"user_id": f"eq.{user_id}"},
+                        headers=self._headers(),
+                        json={
+                            "subscription_type": None,
+                            "subscription_expires_at": None,
+                        },
+                        timeout=10.0,
+                    )
+                    return True
         except Exception as e:
             print(f"[Admin] set_subscription error: {e}")
             return False
