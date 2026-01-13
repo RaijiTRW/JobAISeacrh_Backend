@@ -13,6 +13,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from scheduler.jobs import run_parsing, run_avito_parsing, run_verification
 from scheduler.human_behavior import is_working_hours
+from services.scheduler_service import scheduler_service
 
 
 # Глобальный scheduler
@@ -78,6 +79,16 @@ async def verification_job_wrapper():
         print(f"[Scheduler] Verification error: {e}")
 
 
+async def volume_stats_wrapper():
+    """Wrapper для записи статистики объёма вакансий (для графика)"""
+    print(f"[Scheduler] Recording volume stats at {datetime.now()}")
+    try:
+        await scheduler_service.record_volume_stats()
+        print(f"[Scheduler] Volume stats recorded")
+    except Exception as e:
+        print(f"[Scheduler] Volume stats error: {e}")
+
+
 def start_scheduler():
     """Запустить scheduler с jobs"""
     sched = get_scheduler()
@@ -106,6 +117,15 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=1),
         id="verification_job",
         name="Vacancy Verification",
+        replace_existing=True,
+    )
+
+    # Запись статистики объёма каждый час (для графика в админке)
+    sched.add_job(
+        volume_stats_wrapper,
+        trigger=IntervalTrigger(hours=1),
+        id="volume_stats_job",
+        name="Volume Stats Recording",
         replace_existing=True,
     )
 

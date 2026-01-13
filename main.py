@@ -13,12 +13,8 @@ from api.routes import vacancies
 from api.routes import employer_vacancies
 from api.routes import admin
 from api.routes import conversations
+from api.routes import scheduler as scheduler_routes
 from scheduler import start_scheduler, shutdown_scheduler
-from scheduler.scheduler import (
-    get_job_status,
-    trigger_parsing_now,
-    trigger_verification_now,
-)
 
 
 @asynccontextmanager
@@ -64,6 +60,7 @@ app.include_router(vacancies.router, prefix="/api/vacancies")
 app.include_router(employer_vacancies.router)
 app.include_router(admin.router)
 app.include_router(conversations.router)
+app.include_router(scheduler_routes.router)
 
 
 @app.get("/")
@@ -78,27 +75,6 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
-
-
-# Scheduler endpoints
-@app.get("/api/scheduler/status")
-async def scheduler_status():
-    """Получить статус scheduler и jobs"""
-    return get_job_status()
-
-
-@app.post("/api/scheduler/parse")
-async def manual_parse():
-    """Запустить парсинг вручную"""
-    stats = await trigger_parsing_now()
-    return stats
-
-
-@app.post("/api/scheduler/verify")
-async def manual_verify():
-    """Запустить верификацию вручную"""
-    stats = await trigger_verification_now()
-    return stats
 
 
 if __name__ == "__main__":

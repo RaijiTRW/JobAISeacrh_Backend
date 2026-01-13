@@ -355,15 +355,99 @@ verification_job = VerificationJob()
 
 
 async def run_parsing():
-    """Wrapper для запуска парсинга HH/SuperJob"""
-    return await parsing_job.run()
+    """Wrapper для запуска парсинга HH/SuperJob с сохранением истории"""
+    from services.scheduler_service import scheduler_service
+
+    # Проверяем, не на паузе ли джоб
+    state = await scheduler_service.get_job_state("parsing_job")
+    if state.get("is_paused"):
+        print("[ParsingJob] Job is paused, skipping...")
+        return {"status": "skipped", "reason": "paused"}
+
+    start_time = datetime.now()
+    stats = await parsing_job.run()
+    end_time = datetime.now()
+
+    # Сохраняем в историю
+    status = "completed"
+    if stats.get("errors"):
+        status = "completed_with_errors"
+    if stats.get("status") == "skipped":
+        status = "skipped"
+
+    await scheduler_service.save_job_history(
+        job_id="parsing_job",
+        job_name="HH/SuperJob Parsing",
+        status=status,
+        started_at=start_time,
+        ended_at=end_time,
+        stats=stats,
+    )
+
+    return stats
 
 
 async def run_avito_parsing():
-    """Wrapper для запуска парсинга Avito"""
-    return await avito_job.run()
+    """Wrapper для запуска парсинга Avito с сохранением истории"""
+    from services.scheduler_service import scheduler_service
+
+    # Проверяем, не на паузе ли джоб
+    state = await scheduler_service.get_job_state("avito_job")
+    if state.get("is_paused"):
+        print("[AvitoJob] Job is paused, skipping...")
+        return {"status": "skipped", "reason": "paused"}
+
+    start_time = datetime.now()
+    stats = await avito_job.run()
+    end_time = datetime.now()
+
+    # Сохраняем в историю
+    status = "completed"
+    if stats.get("errors"):
+        status = "completed_with_errors"
+    if stats.get("status") == "skipped":
+        status = "skipped"
+
+    await scheduler_service.save_job_history(
+        job_id="avito_job",
+        job_name="Avito Parsing",
+        status=status,
+        started_at=start_time,
+        ended_at=end_time,
+        stats=stats,
+    )
+
+    return stats
 
 
 async def run_verification():
-    """Wrapper для запуска верификации"""
-    return await verification_job.run()
+    """Wrapper для запуска верификации с сохранением истории"""
+    from services.scheduler_service import scheduler_service
+
+    # Проверяем, не на паузе ли джоб
+    state = await scheduler_service.get_job_state("verification_job")
+    if state.get("is_paused"):
+        print("[VerificationJob] Job is paused, skipping...")
+        return {"status": "skipped", "reason": "paused"}
+
+    start_time = datetime.now()
+    stats = await verification_job.run()
+    end_time = datetime.now()
+
+    # Сохраняем в историю
+    status = "completed"
+    if stats.get("errors") and stats["errors"] > 0:
+        status = "completed_with_errors"
+    if stats.get("status") == "skipped":
+        status = "skipped"
+
+    await scheduler_service.save_job_history(
+        job_id="verification_job",
+        job_name="Vacancy Verification",
+        status=status,
+        started_at=start_time,
+        ended_at=end_time,
+        stats=stats,
+    )
+
+    return stats
