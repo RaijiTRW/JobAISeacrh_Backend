@@ -205,3 +205,120 @@ async def get_preferences(user_id: str, chat_id: Optional[str] = None):
     if session_key in sessions:
         return sessions[session_key]["preferences"].model_dump()
     return UserPreferences().model_dump()
+
+
+# === Support Chat (FloatingChat) ===
+
+class SupportChatRequest(BaseModel):
+    message: str
+    context: Optional[str] = None
+
+
+class SupportChatResponse(BaseModel):
+    response: str
+    connect_to_admin: bool = False
+
+
+# Ключевые слова для определения запроса к администратору
+ADMIN_KEYWORDS = [
+    "человек", "живой", "оператор", "администратор", "админ", "поддержка",
+    "связаться", "позвонить", "менеджер", "консультант", "помощь живого",
+    "реальный человек", "не бот", "хочу поговорить", "нужна помощь человека",
+    "соединить с", "переключить на", "написать админу", "жалоба",
+    "проблема с оплатой", "не работает оплата", "возврат денег", "отменить подписку",
+]
+
+import re
+
+ADMIN_PATTERNS = [
+    r"свяжи(те)?.*с.*человек",
+    r"хочу.*говорить.*с.*человек",
+    r"нужен.*живой",
+    r"перевед(и|ите).*на.*оператор",
+    r"можно.*поговорить.*с",
+    r"есть.*живой.*оператор",
+    r"как.*связаться.*с.*поддержк",
+    r"хочу.*пожаловаться",
+    r"вернуть.*деньги",
+]
+
+
+def detect_admin_request(message: str) -> bool:
+    """Определяет, хочет ли пользователь связаться с админом"""
+    lower_message = message.lower()
+
+    for keyword in ADMIN_KEYWORDS:
+        if keyword in lower_message:
+            return True
+
+    for pattern in ADMIN_PATTERNS:
+        if re.search(pattern, lower_message, re.IGNORECASE):
+            return True
+
+    return False
+
+
+@router.post("/support", response_model=SupportChatResponse)
+async def support_chat(request: SupportChatRequest):
+    """
+    AI-чат поддержки для FloatingChat (не поиск вакансий)
+    """
+    import httpx
+
+    settings = get_settings()
+    needs_admin = detect_admin_request(request.message)
+
+    system_prompt = (
+        "Ты дружелюбный помощник на сайте поиска работы JobAISearch.\n"
+        "Пользователь хочет связаться с живым администратором.\n"
+        "Скажи что понимаешь его и сейчас подключишь к администратору.\n"
+        "Будь вежлив и краток. Ответь на русском языке."
+        if needs_admin else
+        "Ты дружелюбный помощник на сайте поиска работы JobAISearch.\n"
+        "Отвечай кратко и по делу на русском языке.\n"
+        "Помогай пользователям с вопросами о поиске работы, резюме и функциях сайта.\n\n"
+        "Основные функции сайта:\n"
+        "- AI-поиск вакансий через чат\n"
+        "- Лента вакансий с фильтрами\n"
+        "- Создание резюме в профиле\n"
+        "- Чат с работодателями\n"
+        "- Подписка Pro дает 10 запросов в день (799₽/мес), триал - 3 дня и 3 запроса в день\n\n"
+        "Если не можешь помочь с вопросом, предложи связаться с администратором."
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.openrouter_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": request.message},
+                    ],
+                    "max_tokens": 500,
+                    "temperature": 0.7,
+                },
+                timeout=30.0,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                ai_response = data["choices"][0]["message"]["content"]
+                return SupportChatResponse(response=ai_response, connect_to_admin=needs_admin)
+            else:
+                print(f"[Support Chat] Error: {response.status_code} {response.text}")
+                return SupportChatResponse(
+                    response="Подключаю вас к администратору..." if needs_admin else "Извините, произошла ошибка. Попробуйте позже.",
+                    connect_to_admin=needs_admin
+                )
+    except Exception as e:
+        print(f"[Support Chat] Exception: {e}")
+        return SupportChatResponse(
+            response="Подключаю вас к администратору..." if needs_admin else "Извините, произошла ошибка. Попробуйте позже.",
+            connect_to_admin=needs_admin
+        )
