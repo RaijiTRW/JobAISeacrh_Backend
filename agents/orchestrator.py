@@ -284,11 +284,12 @@ class Orchestrator:
                     result = await vacancy_search.search(filters)
                     print(f"Search result: {len(result.vacancies)} vacancies found")
 
-                    # Валидируем вакансии (передаём queries для контекстной фильтрации)
+                    # Валидируем вакансии (передаём queries и город для фильтрации)
                     validation_result = await self.validator.validate_batch(
                         result.vacancies,
                         preferences,
                         queries=filters.queries,
+                        required_city=filters.city,
                     )
                     print(f"Validated: {len(validation_result.validated)} vacancies, rejected: {len(validation_result.rejected)}")
 
@@ -322,6 +323,7 @@ class Orchestrator:
                                 result2.vacancies,
                                 preferences,
                                 queries=new_queries,
+                                required_city=filters.city,
                             )
                             print(f"[Feedback Loop] Second validation: {len(validation2.validated)} validated")
 

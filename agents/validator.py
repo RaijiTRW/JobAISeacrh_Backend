@@ -38,6 +38,7 @@ class VacancyValidator:
         vacancies: list[Vacancy],
         preferences: UserPreferences,
         queries: list[str] = None,
+        required_city: str = None,
     ) -> ValidationResult:
         """AI валидация с confidence scoring"""
         if not vacancies:
@@ -48,15 +49,87 @@ class VacancyValidator:
 
         print(f"[Validator] Input: {len(vacancies)} vacancies")
         print(f"[Validator] User query: {queries_text}")
+        print(f"[Validator] Required city: {required_city}")
 
         # Пользовательские исключения
         user_exclusions = [w.lower().strip() for w in preferences.exclude_keywords if w]
 
-        # Pre-фильтр: только явные исключения пользователя
+        # Нормализация города для сравнения
+        def normalize_city(city: str) -> str:
+            if not city:
+                return ""
+            city = city.lower().strip()
+            # Убираем окончания и приводим к базовой форме
+            replacements = {
+                "санкт-петербург": "спб",
+                "петербург": "спб",
+                "ленинград": "спб",
+                "с-петербург": "спб",
+                "москва": "москва",
+                "мск": "москва",
+                "новороссийск": "новороссийск",
+                "новоросс": "новороссийск",
+                "краснодар": "краснодар",
+                "ростов-на-дону": "ростов",
+                "ростов на дону": "ростов",
+                "ростов-на-дону": "ростов",
+                "нижний новгород": "нижний новгород",
+                "н.новгород": "нижний новгород",
+                "екатеринбург": "екатеринбург",
+                "екб": "екатеринбург",
+                "новосибирск": "новосибирск",
+                "нск": "новосибирск",
+                "казань": "казань",
+                "самара": "самара",
+                "челябинск": "челябинск",
+                "омск": "омск",
+                "уфа": "уфа",
+                "красноярск": "красноярск",
+                "воронеж": "воронеж",
+                "волгоград": "волгоград",
+                "мурманск": "мурманск",
+                "сочи": "сочи",
+                "анапа": "анапа",
+                "геленджик": "геленджик",
+            }
+            for full, short in replacements.items():
+                if full in city or city in full:
+                    return short
+            return city
+
+        required_city_normalized = normalize_city(required_city) if required_city else None
+
+        # Pre-фильтр: город, исключения пользователя, зарплата
         to_validate = []
         user_rejected = []
 
         for vacancy in vacancies:
+            # === ПРОВЕРКА ГОРОДА ===
+            if required_city_normalized:
+                vacancy_city = normalize_city(vacancy.city)
+                title_lower = (vacancy.title or "").lower()
+                desc_lower = (vacancy.description or "").lower()
+
+                # Проверяем на удалёнку
+                is_remote = any(word in title_lower or word in desc_lower for word in
+                    ["удалён", "удаленн", "remote", "дистанцион", "из дома", "работа из любого города"])
+
+                # Если город вакансии не указан
+                if not vacancy_city:
+                    # Пропускаем только если это явно удалёнка
+                    if not is_remote:
+                        print(f"[Validator] No city in vacancy: '{vacancy.title}' (need '{required_city}')")
+                        user_rejected.append(vacancy)
+                        continue
+                # Если город указан - сравниваем
+                elif required_city_normalized not in vacancy_city and vacancy_city not in required_city_normalized:
+                    # Разрешаем удалённые вакансии
+                    if not is_remote:
+                        print(f"[Validator] City mismatch: '{vacancy.title}' in '{vacancy.city}' (need '{required_city}')")
+                        user_rejected.append(vacancy)
+                        continue
+
+            # === ПРОВЕРКА ИСКЛЮЧЕНИЙ ===
             if user_exclusions:
                 full_text = f"{(vacancy.title or '').lower()} {(vacancy.description or '').lower()}"
                 excluded = False
@@ -69,7 +142,7 @@ class VacancyValidator:
                     user_rejected.append(vacancy)
                     continue
 
-            # Проверка зарплаты
+            # === ПРОВЕРКА ЗАРПЛАТЫ ===
             if preferences.salary_from:
                 if vacancy.salary_to and vacancy.salary_to < preferences.salary_from:
                     user_rejected.append(vacancy)
