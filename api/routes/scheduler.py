@@ -13,8 +13,9 @@ from scheduler.scheduler import (
     get_job_status,
     trigger_parsing_now,
     trigger_verification_now,
+    trigger_old_parsing_now,
 )
-from scheduler.jobs import run_avito_parsing
+from scheduler.jobs import run_avito_parsing, run_mass_parsing
 
 
 router = APIRouter(prefix="/api/admin/scheduler", tags=["scheduler"])
@@ -82,12 +83,13 @@ async def require_admin(authorization: str) -> str:
 
 
 JOB_NAMES = {
-    "parsing_job": "HH/SuperJob",
-    "avito_job": "Avito",
+    "mass_parsing_job": "Парсинг ленты",  # Новый массовый парсинг
+    "parsing_job": "HH/SuperJob (старый)",  # Deprecated
+    "avito_job": "Avito (отключен)",  # Отключен
     "verification_job": "Верификация",
 }
 
-VALID_JOB_IDS = ["parsing_job", "avito_job", "verification_job"]
+VALID_JOB_IDS = ["mass_parsing_job", "parsing_job", "avito_job", "verification_job"]
 
 
 # === Routes ===
@@ -173,9 +175,14 @@ async def trigger_job(job_id: str, authorization: str = Header(None)):
         raise HTTPException(status_code=400, detail="Invalid job ID")
 
     try:
-        if job_id == "parsing_job":
+        if job_id == "mass_parsing_job":
+            # Новый массовый парсинг для ленты
             stats = await trigger_parsing_now()
+        elif job_id == "parsing_job":
+            # Старый парсинг (deprecated)
+            stats = await trigger_old_parsing_now()
         elif job_id == "avito_job":
+            # Avito отключен, но можем запустить вручную
             stats = await run_avito_parsing()
         elif job_id == "verification_job":
             stats = await trigger_verification_now()
