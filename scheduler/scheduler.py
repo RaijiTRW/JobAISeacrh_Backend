@@ -1,7 +1,7 @@
 """
 APScheduler настройка и управление
-- HH/SuperJob: каждые 2 часа
-- Avito: каждые 4 часа (щадящий режим)
+- Mass HH/SuperJob: каждые 2 часа (50 запросов, ~10k вакансий)
+- Avito: ОТКЛЮЧЕН (слишком агрессивные блокировки)
 - Верификация: каждый час
 """
 
@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 
-from scheduler.jobs import run_parsing, run_avito_parsing, run_verification
+from scheduler.jobs import run_parsing, run_avito_parsing, run_verification, run_mass_parsing
 from scheduler.human_behavior import is_working_hours
 from services.scheduler_service import scheduler_service
 
@@ -37,8 +37,8 @@ def get_scheduler() -> AsyncIOScheduler:
 
 async def parsing_job_wrapper():
     """
-    Wrapper для парсинга с проверкой рабочих часов.
-    Парсим только днём для естественности.
+    Wrapper для старого парсинга (оставлен для совместимости).
+    Используйте mass_parsing_job_wrapper для нового массового парсинга.
     """
     if not is_working_hours():
         print(f"[Scheduler] Skipping parsing - outside working hours")
@@ -50,6 +50,27 @@ async def parsing_job_wrapper():
         print(f"[Scheduler] Parsing completed: {stats.get('total_saved', 0)} vacancies saved")
     except Exception as e:
         print(f"[Scheduler] Parsing error: {e}")
+
+
+async def mass_parsing_job_wrapper():
+    """
+    Wrapper для массового парсинга HH/SuperJob.
+    50 запросов за сеанс, цель ~10k вакансий.
+    Парсим только в рабочие часы (8:00-23:00).
+    """
+    if not is_working_hours():
+        print(f"[Scheduler] Skipping mass parsing - outside working hours")
+        return
+
+    print(f"[Scheduler] Starting MASS parsing job at {datetime.now()}")
+    try:
+        stats = await run_mass_parsing()
+        total_saved = stats.get('total_saved', 0)
+        hh_saved = stats.get('hh', {}).get('saved', 0)
+        sj_saved = stats.get('superjob', {}).get('saved', 0)
+        print(f"[Scheduler] Mass parsing completed: {total_saved} vacancies saved (HH: {hh_saved}, SJ: {sj_saved})")
+    except Exception as e:
+        print(f"[Scheduler] Mass parsing error: {e}")
 
 
 async def avito_job_wrapper():
@@ -93,23 +114,23 @@ def start_scheduler():
     """Запустить scheduler с jobs"""
     sched = get_scheduler()
 
-    # Парсинг HH/SuperJob каждые 2 часа (в рабочее время)
+    # МАССОВЫЙ парсинг HH/SuperJob каждые 2 часа (50 запросов, ~10k вакансий)
     sched.add_job(
-        parsing_job_wrapper,
+        mass_parsing_job_wrapper,
         trigger=IntervalTrigger(hours=2),
-        id="parsing_job",
-        name="HH/SuperJob Parsing",
+        id="mass_parsing_job",
+        name="Mass HH/SuperJob Parsing",
         replace_existing=True,
     )
 
-    # Парсинг Avito каждые 4 часа (щадящий режим)
-    sched.add_job(
-        avito_job_wrapper,
-        trigger=IntervalTrigger(hours=4),
-        id="avito_job",
-        name="Avito Parsing",
-        replace_existing=True,
-    )
+    # AVITO ОТКЛЮЧЕН - слишком агрессивные блокировки
+    # sched.add_job(
+    #     avito_job_wrapper,
+    #     trigger=IntervalTrigger(hours=4),
+    #     id="avito_job",
+    #     name="Avito Parsing",
+    #     replace_existing=True,
+    # )
 
     # Верификация каждый час
     sched.add_job(
@@ -168,8 +189,14 @@ def get_job_status() -> dict:
 
 
 async def trigger_parsing_now():
-    """Запустить парсинг вручную (для тестирования)"""
-    print("[Scheduler] Manual parsing triggered")
+    """Запустить МАССОВЫЙ парсинг вручную (для тестирования)"""
+    print("[Scheduler] Manual MASS parsing triggered")
+    return await run_mass_parsing()
+
+
+async def trigger_old_parsing_now():
+    """Запустить старый парсинг вручную (для совместимости)"""
+    print("[Scheduler] Manual old parsing triggered")
     return await run_parsing()
 
 

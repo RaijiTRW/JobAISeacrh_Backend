@@ -16,8 +16,9 @@ from config import get_settings
 class VacancySearchTool:
     """Единый инструмент поиска вакансий"""
 
-    # Минимальное количество вакансий из БД, после которого не нужен live-поиск
-    MIN_DB_RESULTS = 10
+    # Минимальное количество вакансий из БД, после которого можно пропустить live-поиск
+    # (но только если есть все источники)
+    MIN_DB_RESULTS = 20
 
     def __init__(self):
         self.settings = get_settings()
@@ -29,36 +30,61 @@ class VacancySearchTool:
 
     async def search(self, filters: SearchFilters) -> SearchResult:
         """
-        Поиск вакансий: сначала БД, потом live-парсинг если мало.
+        Поиск вакансий: сначала БД, потом live-парсинг.
+        Учитывает режим поиска: search_in_feed (БД) и search_online (live).
         """
         queries = filters.queries
+        search_in_feed = filters.search_in_feed
+        search_online = filters.search_online
+
         print(f"[Search] Searching with {len(queries)} queries: {queries}")
+        print(f"[Search] Mode: feed={search_in_feed}, online={search_online}")
 
-        # === ШАГ 1: Поиск в БД ===
-        db_vacancies = await self._search_db(filters)
-        print(f"[Search] Found {len(db_vacancies)} in DB")
+        db_vacancies = []
+        live_vacancies = []
 
-        # Если достаточно результатов из БД — возвращаем их
-        if len(db_vacancies) >= self.MIN_DB_RESULTS:
-            print(f"[Search] Enough results from DB, skipping live search")
-            # Применяем дедупликацию и лимиты
-            processed = self._process_results(db_vacancies, filters)
-            return SearchResult(
-                vacancies=processed,
-                total_found=len(db_vacancies),
-                filters_applied=filters,
-            )
+        # === ШАГ 1: Поиск в БД (если включен) ===
+        if search_in_feed:
+            db_vacancies = await self._search_db(filters)
+            print(f"[Search] Found {len(db_vacancies)} in DB")
 
-        # === ШАГ 2: Live-парсинг (если БД недостаточно) ===
-        print(f"[Search] Not enough in DB ({len(db_vacancies)}), starting live search...")
-        live_vacancies = await self._search_live(filters)
-        print(f"[Search] Found {len(live_vacancies)} from live search")
+        # === ШАГ 2: Live-парсинг (если включен) ===
+        if search_online:
+            # Если только online — ищем всё
+            # Если оба включены — сначала проверяем какие источники отсутствуют в БД
+            if search_in_feed and db_vacancies:
+                db_sources = set(v.source for v in db_vacancies)
+                missing_sources = {"hh", "avito", "superjob"} - db_sources
 
-        # Сохраняем новые вакансии в БД (в фоне)
-        asyncio.create_task(self._save_to_db(live_vacancies))
+                # Если достаточно результатов И есть все источники — пропускаем live
+                if len(db_vacancies) >= self.MIN_DB_RESULTS and not missing_sources:
+                    print(f"[Search] Enough results from DB with all sources, skipping live search")
+                else:
+                    if missing_sources:
+                        print(f"[Search] Missing sources in DB: {missing_sources}, doing live search for them")
+                        live_vacancies = await self._search_live(filters, only_sources=missing_sources)
+                    else:
+                        print(f"[Search] Not enough in DB ({len(db_vacancies)}), starting full live search...")
+                        live_vacancies = await self._search_live(filters)
+            else:
+                # Только online или БД пуста — полный live поиск
+                print(f"[Search] Doing full live search...")
+                live_vacancies = await self._search_live(filters)
 
-        # Объединяем: БД + live (без дубликатов)
-        all_vacancies = self._merge_results(db_vacancies, live_vacancies)
+            print(f"[Search] Found {len(live_vacancies)} from live search")
+
+            # Сохраняем новые вакансии в БД (в фоне)
+            if live_vacancies:
+                asyncio.create_task(self._save_to_db(live_vacancies))
+
+        # Объединяем результаты
+        if search_in_feed and search_online:
+            all_vacancies = self._merge_results(db_vacancies, live_vacancies)
+        elif search_in_feed:
+            all_vacancies = db_vacancies
+        else:
+            all_vacancies = live_vacancies
+
         print(f"[Search] Total after merge: {len(all_vacancies)}")
 
         # Применяем дедупликацию и лимиты
@@ -74,14 +100,14 @@ class VacancySearchTool:
         """Поиск в базе данных"""
         all_vacancies = []
 
-        for query in filters.queries[:5]:  # Максимум 5 запросов к БД
+        for query in filters.queries[:7]:  # Максимум 7 запросов к БД
             try:
                 stored, _ = await vacancy_storage_service.search_vacancies(
                     query=query,
                     city=filters.city,
                     salary_from=filters.salary_from,
                     experience=filters.experience,
-                    limit=30,
+                    limit=50,
                     offset=0,
                 )
                 for sv in stored:
@@ -100,13 +126,18 @@ class VacancySearchTool:
 
         return unique
 
-    async def _search_live(self, filters: SearchFilters) -> list[Vacancy]:
-        """Live-парсинг с сайтов"""
+    async def _search_live(self, filters: SearchFilters, only_sources: set[str] = None) -> list[Vacancy]:
+        """Live-парсинг с сайтов. only_sources - если указан, парсим только эти источники."""
         queries = filters.queries
 
         hh_parser = self.parsers[0]  # HHParser
         avito_parser = self.parsers[1]  # AvitoParser
         sj_parser = self.parsers[2]  # SuperJobParser
+
+        # Определяем какие источники парсить
+        search_hh = only_sources is None or "hh" in only_sources
+        search_sj = only_sources is None or "superjob" in only_sources
+        search_avito = only_sources is None or "avito" in only_sources
 
         # HH и SuperJob - все queries параллельно
         parallel_tasks = []
@@ -120,34 +151,45 @@ class VacancySearchTool:
                 employment_type=filters.employment_type,
                 exclude_keywords=filters.exclude_keywords,
             )
-            parallel_tasks.append(hh_parser.search(single_filter, limit=self.settings.max_vacancies_per_source))
-            parallel_tasks.append(sj_parser.search(single_filter, limit=self.settings.max_vacancies_per_source))
+            if search_hh:
+                parallel_tasks.append(hh_parser.search(single_filter, limit=self.settings.max_vacancies_per_source))
+            if search_sj:
+                parallel_tasks.append(sj_parser.search(single_filter, limit=self.settings.max_vacancies_per_source))
 
-        print(f"[Search] Running {len(parallel_tasks)} parallel tasks (HH + SuperJob)")
-        parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+        sources_str = []
+        if search_hh:
+            sources_str.append("HH")
+        if search_sj:
+            sources_str.append("SuperJob")
 
-        # Avito - максимум 2 запроса для скорости
-        avito_queries = queries[:2]
+        if parallel_tasks:
+            print(f"[Search] Running {len(parallel_tasks)} parallel tasks ({' + '.join(sources_str)})")
+            parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+        else:
+            parallel_results = []
+
+        # Avito - максимум 3 запроса
         avito_results = []
-
-        print(f"[Search] Running Avito search ({len(avito_queries)} queries)")
-        for i, query in enumerate(avito_queries):
-            avito_filter = SearchFilters(
-                query=query,
-                city=filters.city,
-                salary_from=filters.salary_from,
-                salary_to=filters.salary_to,
-                experience=filters.experience,
-                employment_type=filters.employment_type,
-                exclude_keywords=filters.exclude_keywords,
-            )
-            try:
-                result = await avito_parser.search(avito_filter, limit=self.settings.max_vacancies_per_source)
-                avito_results.append(result)
-                print(f"[Search] Avito query {i+1}/{len(avito_queries)}: found {len(result)}")
-            except Exception as e:
-                print(f"[Search] Avito error: {e}")
-                avito_results.append([])
+        if search_avito:
+            avito_queries = queries[:3]
+            print(f"[Search] Running Avito search ({len(avito_queries)} queries)")
+            for i, query in enumerate(avito_queries):
+                avito_filter = SearchFilters(
+                    query=query,
+                    city=filters.city,
+                    salary_from=filters.salary_from,
+                    salary_to=filters.salary_to,
+                    experience=filters.experience,
+                    employment_type=filters.employment_type,
+                    exclude_keywords=filters.exclude_keywords,
+                )
+                try:
+                    result = await avito_parser.search(avito_filter, limit=self.settings.max_vacancies_per_source)
+                    avito_results.append(result)
+                    print(f"[Search] Avito query {i+1}/{len(avito_queries)}: found {len(result)}")
+                except Exception as e:
+                    print(f"[Search] Avito error: {e}")
+                    avito_results.append([])
 
         # Объединяем все результаты
         results = list(parallel_results) + avito_results
@@ -207,8 +249,8 @@ class VacancySearchTool:
         unique_vacancies = self._semantic_dedupe(unique_vacancies)
         print(f"[Search] After semantic dedupe: {len(unique_vacancies)}")
 
-        # Балансируем источники
-        max_per_source = self.settings.max_total_vacancies // 3 + 5
+        # Балансируем источники (берём больше с каждого)
+        max_per_source = self.settings.max_total_vacancies // 2
         by_source = {"hh": [], "avito": [], "superjob": []}
         for v in unique_vacancies:
             if v.source in by_source:

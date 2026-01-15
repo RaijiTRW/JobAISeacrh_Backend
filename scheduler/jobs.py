@@ -23,8 +23,14 @@ from scheduler.human_behavior import (
     get_random_city,
     get_random_queries,
     get_random_cities,
+    get_random_user_agent,
     POPULAR_QUERIES,
     POPULAR_CITIES,
+    # Новые функции для массового парсинга
+    generate_session_requests,
+    get_mass_batch_size,
+    smart_delay,
+    micro_break,
 )
 
 
@@ -148,10 +154,150 @@ class ParsingJob:
 
         return stats
 
+class MassParsingJob:
+    """
+    Job для массового сбора вакансий с HH и SuperJob.
+    Запускается каждые 2 часа.
+    Цель: ~10,000 вакансий за сеанс.
+    """
+
+    def __init__(self):
+        self.settings = get_settings()
+        self.hh_parser = HHParser()
+        self.sj_parser = SuperJobParser()
+        self.is_running = False
+        self.user_agent = get_random_user_agent()
+
+    async def run(self) -> dict:
+        """
+        Запустить массовый парсинг HH и SuperJob.
+        50 запросов × 2 источника = 100 API вызовов.
+        """
+        if self.is_running:
+            print("[MassParsingJob] Already running, skipping...")
+            return {"status": "skipped", "reason": "already_running"}
+
+        self.is_running = True
+        start_time = datetime.now()
+        stats = {
+            "started_at": start_time.isoformat(),
+            "hh": {"parsed": 0, "saved": 0, "requests": 0},
+            "superjob": {"parsed": 0, "saved": 0, "requests": 0},
+            "total_saved": 0,
+            "unique_cities": [],
+            "unique_queries": [],
+            "errors": [],
+        }
+
+        print(f"[MassParsingJob] Starting at {start_time}")
+
+        try:
+            # Генерируем 50 уникальных комбинаций query+city
+            requests_count = self.settings.mass_parsing_requests
+            session_requests = generate_session_requests(requests_count)
+
+            cities_seen = set()
+            queries_seen = set()
+
+            print(f"[MassParsingJob] Generated {len(session_requests)} request combinations")
+
+            for i, req in enumerate(session_requests):
+                query = req["query"]
+                city = req["city"]
+
+                cities_seen.add(city)
+                queries_seen.add(query)
+
+                print(f"[MassParsingJob] [{i+1}/{len(session_requests)}] {query} in {city}")
+
+                # HH (увеличенный batch до 100)
+                try:
+                    hh_batch = get_mass_batch_size("hh")
+                    hh_stats = await self._parse_source("hh", self.hh_parser, query, city, hh_batch)
+                    stats["hh"]["parsed"] += hh_stats["parsed"]
+                    stats["hh"]["saved"] += hh_stats["saved"]
+                    stats["hh"]["requests"] += 1
+                except Exception as e:
+                    stats["errors"].append(f"HH [{i}]: {str(e)}")
+                    print(f"[MassParsingJob] HH error: {e}")
+
+                # Умная задержка после HH
+                await smart_delay(i, "hh")
+
+                # SuperJob (batch до 30)
+                try:
+                    sj_batch = get_mass_batch_size("superjob")
+                    sj_stats = await self._parse_source("superjob", self.sj_parser, query, city, sj_batch)
+                    stats["superjob"]["parsed"] += sj_stats["parsed"]
+                    stats["superjob"]["saved"] += sj_stats["saved"]
+                    stats["superjob"]["requests"] += 1
+                except Exception as e:
+                    stats["errors"].append(f"SuperJob [{i}]: {str(e)}")
+                    print(f"[MassParsingJob] SuperJob error: {e}")
+
+                # Умная задержка после SuperJob
+                await smart_delay(i, "superjob")
+
+                # Микропауза каждые N запросов
+                if (i + 1) % self.settings.micro_break_every == 0:
+                    await micro_break()
+                    # Меняем User-Agent после микропаузы
+                    self.user_agent = get_random_user_agent()
+
+            stats["total_saved"] = stats["hh"]["saved"] + stats["superjob"]["saved"]
+            stats["unique_cities"] = list(cities_seen)
+            stats["unique_queries"] = list(queries_seen)
+
+        except Exception as e:
+            stats["errors"].append(f"General: {str(e)}")
+            print(f"[MassParsingJob] General error: {e}")
+
+        finally:
+            self.is_running = False
+            end_time = datetime.now()
+            stats["ended_at"] = end_time.isoformat()
+            stats["duration_seconds"] = (end_time - start_time).total_seconds()
+
+        print(f"[MassParsingJob] Finished. Total saved: {stats['total_saved']}")
+        print(f"[MassParsingJob] HH: {stats['hh']['saved']}, SuperJob: {stats['superjob']['saved']}")
+        print(f"[MassParsingJob] Duration: {stats['duration_seconds']:.0f}s")
+
+        return stats
+
+    async def _parse_source(
+        self,
+        source: str,
+        parser,
+        query: str,
+        city: str,
+        batch_size: int,
+    ) -> dict:
+        """Парсинг одного источника с увеличенным batch"""
+        stats = {"parsed": 0, "saved": 0}
+
+        try:
+            filters = SearchFilters(query=query, city=city)
+            vacancies = await parser.search(filters, limit=batch_size)
+            stats["parsed"] = len(vacancies)
+
+            # Сохраняем в БД
+            for vacancy in vacancies:
+                if await vacancy_storage_service.save_vacancy(vacancy):
+                    stats["saved"] += 1
+
+            print(f"[MassParsingJob] {source}: parsed={stats['parsed']}, saved={stats['saved']}")
+
+        except Exception as e:
+            print(f"[MassParsingJob] {source} parse error: {e}")
+
+        return stats
+
+
 class AvitoParsingJob:
     """
     Отдельный job для парсинга Avito.
     Запускается каждые 4 часа с увеличенными задержками.
+    ОТКЛЮЧЕН - Avito слишком агрессивно блокирует.
     """
 
     def __init__(self):
@@ -352,6 +498,7 @@ class VerificationJob:
 parsing_job = ParsingJob()
 avito_job = AvitoParsingJob()
 verification_job = VerificationJob()
+mass_parsing_job = MassParsingJob()  # Новый массовый парсинг
 
 
 async def run_parsing():
@@ -444,6 +591,44 @@ async def run_verification():
     await scheduler_service.save_job_history(
         job_id="verification_job",
         job_name="Vacancy Verification",
+        status=status,
+        started_at=start_time,
+        ended_at=end_time,
+        stats=stats,
+    )
+
+    return stats
+
+
+async def run_mass_parsing():
+    """Wrapper для запуска массового парсинга HH/SuperJob с сохранением истории"""
+    from services.scheduler_service import scheduler_service
+
+    # Проверяем, не на паузе ли джоб
+    state = await scheduler_service.get_job_state("mass_parsing_job")
+    if state.get("is_paused"):
+        print("[MassParsingJob] Job is paused, skipping...")
+        return {"status": "skipped", "reason": "paused"}
+
+    # Проверяем рабочие часы (8:00-23:00)
+    if not is_working_hours():
+        print("[MassParsingJob] Outside working hours, skipping...")
+        return {"status": "skipped", "reason": "outside_working_hours"}
+
+    start_time = datetime.now()
+    stats = await mass_parsing_job.run()
+    end_time = datetime.now()
+
+    # Сохраняем в историю
+    status = "completed"
+    if stats.get("errors"):
+        status = "completed_with_errors"
+    if stats.get("status") == "skipped":
+        status = "skipped"
+
+    await scheduler_service.save_job_history(
+        job_id="mass_parsing_job",
+        job_name="Mass HH/SuperJob Parsing",
         status=status,
         started_at=start_time,
         ended_at=end_time,

@@ -218,7 +218,7 @@ class Orchestrator:
         )
 
         # Обработка ответа
-        return await self._process_response(response, preferences, user_data)
+        return await self._process_response(response, preferences, user_data, request)
 
     def _convert_tool_to_openai(self, anthropic_tool: dict) -> dict:
         """Конвертация формата инструмента Anthropic в OpenAI"""
@@ -236,6 +236,7 @@ class Orchestrator:
         response: dict,
         preferences: UserPreferences,
         user_data: Optional[UserData] = None,
+        request: Optional[ChatRequest] = None,
     ) -> ChatResponse:
         """Обработка ответа от OpenRouter"""
         text_parts = []
@@ -280,6 +281,12 @@ class Orchestrator:
                         args["queries"] = all_queries[:10]  # Максимум 10 запросов
                         print(f"Enhanced queries: {args['queries']}")
 
+                    # Добавляем режим поиска из запроса
+                    if request:
+                        args["search_in_feed"] = request.search_in_feed
+                        args["search_online"] = request.search_online
+                        print(f"Search mode: feed={request.search_in_feed}, online={request.search_online}")
+
                     filters = SearchFilters(**args)
                     result = await vacancy_search.search(filters)
                     print(f"Search result: {len(result.vacancies)} vacancies found")
@@ -311,6 +318,8 @@ class Orchestrator:
                             experience=filters.experience,
                             employment_type=filters.employment_type,
                             exclude_keywords=filters.exclude_keywords,
+                            search_in_feed=filters.search_in_feed,
+                            search_online=filters.search_online,
                         )
 
                         # Второй поиск

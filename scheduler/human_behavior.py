@@ -723,3 +723,94 @@ class HumanSession:
             "Sec-Fetch-User": "?1",
             "Cache-Control": "max-age=0",
         }
+
+
+# ============================================
+# Функции для массового парсинга (MassParsingJob)
+# ============================================
+
+def generate_session_requests(count: int = 50) -> list[dict]:
+    """
+    Генерирует уникальные комбинации запрос+город для сеанса массового парсинга.
+    Все города равноправны (без приоритета Москвы/СПб).
+    """
+    requests = []
+
+    # Все города равноправны
+    all_cities = POPULAR_CITIES.copy()
+    random.shuffle(all_cities)
+
+    # Все запросы
+    all_queries = POPULAR_QUERIES.copy()
+    random.shuffle(all_queries)
+
+    # Генерируем уникальные комбинации
+    for i in range(count):
+        city = all_cities[i % len(all_cities)]
+        query = all_queries[i % len(all_queries)]
+        requests.append({"query": query, "city": city})
+
+    return requests
+
+
+def get_mass_batch_size(source: str) -> int:
+    """
+    Увеличенные batch sizes для массового парсинга.
+    HH API поддерживает до 100, SuperJob ограничен web scraping.
+    """
+    from config import get_settings
+    settings = get_settings()
+
+    if source == "hh":
+        return settings.hh_mass_batch_size  # 100
+    elif source == "superjob":
+        return settings.superjob_mass_batch_size  # 30
+    else:
+        return 20  # fallback
+
+
+async def smart_delay(request_num: int, source: str) -> None:
+    """
+    Имитация человеческого поведения с умными задержками:
+    - Случайные задержки 2-8 сек
+    - Иногда "задумывается" на 15-30 сек (5% шанс)
+    - Фактор усталости — задержки увеличиваются к концу сеанса
+    """
+    from config import get_settings
+    settings = get_settings()
+
+    base_delay = random.uniform(
+        settings.parsing_min_delay,
+        settings.parsing_max_delay
+    )
+
+    # SuperJob более чувствителен — увеличиваем задержку
+    if source == "superjob":
+        base_delay *= 1.5
+
+    # Иногда "задумывается" (5% шанс)
+    if random.random() < 0.05:
+        base_delay += random.uniform(15, 30)
+        print(f"[MassParsing] Thinking pause: {base_delay:.1f}s")
+
+    # Фактор усталости — к 50-му запросу задержки +20%
+    fatigue_factor = 1 + (request_num / 100) * 0.2
+
+    final_delay = base_delay * fatigue_factor
+    await asyncio.sleep(final_delay)
+
+
+async def micro_break() -> None:
+    """
+    Микропауза каждые N запросов (30-60 сек).
+    Имитирует человека, который отвлёкся на чай/соцсети.
+    """
+    from config import get_settings
+    settings = get_settings()
+
+    break_time = random.uniform(
+        settings.micro_break_min,
+        settings.micro_break_max
+    )
+    print(f"[MassParsing] Micro break: {break_time:.0f}s")
+    await asyncio.sleep(break_time)

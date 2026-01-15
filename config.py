@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     max_tokens: int = 4096
 
     # Search settings
-    max_vacancies_per_source: int = 30  # Оптимально для скорости
-    max_total_vacancies: int = 60  # Не слишком много чтобы не было таймаута
+    max_vacancies_per_source: int = 50  # Больше вакансий с каждого источника
+    max_total_vacancies: int = 150  # Максимум вакансий для пользователя
 
     # Proxy settings (для обхода rate limiting на Avito)
     # Формат: http://user:pass@host:port или http://host:port
@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     trial_days: int = 3
     trial_daily_limit: int = 3
     pro_daily_limit: int = 10
+
+    # Массовый парсинг (scheduler)
+    mass_parsing_requests: int = 50  # запросов за сеанс
+    hh_mass_batch_size: int = 100  # HH API поддерживает до 100
+    superjob_mass_batch_size: int = 30  # SuperJob ограничен web scraping
+    parsing_min_delay: float = 2.0  # мин. задержка между запросами (сек)
+    parsing_max_delay: float = 8.0  # макс. задержка между запросами (сек)
+    micro_break_every: int = 10  # микропауза каждые N запросов
+    micro_break_min: float = 30.0  # мин. микропауза (сек)
+    micro_break_max: float = 60.0  # макс. микропауза (сек)
 
     class Config:
         env_file = ".env"

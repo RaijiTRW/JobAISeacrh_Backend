@@ -33,6 +33,8 @@ class ChatMessageRequest(BaseModel):
     message: str
     chat_id: Optional[str] = None
     user_id: str
+    search_in_feed: bool = True  # Поиск в ленте (БД)
+    search_online: bool = True   # Поиск в сети (live)
 
 
 class ChatMessageResponse(BaseModel):
@@ -144,6 +146,8 @@ async def send_message_stream(request: ChatMessageRequest):
             message=request.message,
             chat_id=request.chat_id,
             user_id=request.user_id,
+            search_in_feed=request.search_in_feed,
+            search_online=request.search_online,
         )
 
         response = await orchestrator.process_message(

@@ -13,6 +13,8 @@ class ChatRequest(BaseModel):
     message: str
     chat_id: Optional[str] = None
     user_id: str
+    search_in_feed: bool = True   # Поиск в ленте (БД)
+    search_online: bool = True    # Поиск в сети (live)
 
 
 class ChatResponse(BaseModel):
