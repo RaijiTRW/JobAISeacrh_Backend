@@ -53,6 +53,11 @@ async def send_message(request: ChatMessageRequest):
     if not can_use:
         raise HTTPException(status_code=402, detail=limit_message)
 
+    # Проверяем доступ к поиску в сети (Base план не имеет доступа)
+    status = await subscription_service.get_full_status(request.user_id)
+    if status.subscription and not status.subscription.can_search_online:
+        request.search_online = False  # Принудительно отключаем для Base плана
+
     # Получаем или создаём сессию
     session_key = f"{request.user_id}_{request.chat_id or 'new'}"
 
@@ -115,6 +120,11 @@ async def send_message_stream(request: ChatMessageRequest):
     can_use, limit_message = await subscription_service.check_and_use_request(request.user_id)
     if not can_use:
         raise HTTPException(status_code=402, detail=limit_message)
+
+    # Проверяем доступ к поиску в сети (Base план не имеет доступа)
+    status = await subscription_service.get_full_status(request.user_id)
+    if status.subscription and not status.subscription.can_search_online:
+        request.search_online = False  # Принудительно отключаем для Base плана
 
     session_key = f"{request.user_id}_{request.chat_id or 'new'}"
 
@@ -286,7 +296,9 @@ async def support_chat(request: SupportChatRequest):
         "- Лента вакансий с фильтрами\n"
         "- Создание резюме в профиле\n"
         "- Чат с работодателями\n"
-        "- Подписка Pro дает 10 запросов в день (799₽/мес), триал - 3 дня и 3 запроса в день\n\n"
+        "- Pro Trial: 7 дней бесплатно при регистрации, 15 запросов/день, полный доступ\n"
+        "- Base: бесплатный план навсегда, 3 запроса/день, поиск только в ленте\n"
+        "- Pro: 799₽/мес, 15 запросов/день, полный поиск включая сеть\n\n"
         "Если не можешь помочь с вопросом, предложи связаться с администратором."
     )
 

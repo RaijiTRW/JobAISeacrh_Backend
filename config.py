@@ -38,9 +38,16 @@ class Settings(BaseSettings):
     subscription_price: int = 799  # рублей в месяц
     extra_requests_price: int = 99  # рублей за пакет
     extra_requests_count: int = 10  # запросов в пакете
-    trial_days: int = 3
-    trial_daily_limit: int = 3
-    pro_daily_limit: int = 10
+
+    # Pro Trial (при регистрации)
+    pro_trial_days: int = 7  # 7 дней Pro Trial
+    pro_trial_daily_limit: int = 15  # 15 запросов/день
+
+    # Base (бесплатный план навсегда)
+    base_daily_limit: int = 3  # 3 запроса/день, только лента
+
+    # Pro (платная подписка)
+    pro_daily_limit: int = 15  # 15 запросов/день (было 10)
 
     # Массовый парсинг (scheduler)
     mass_parsing_requests: int = 50  # запросов за сеанс

@@ -11,11 +11,12 @@ from config import get_settings
 
 class SubscriptionInfo(BaseModel):
     """Информация о подписке"""
-    plan: str  # trial, pro
+    plan: str  # pro_trial, base, pro
     status: str  # active, expired, cancelled
-    expires_at: str
-    days_left: int
+    expires_at: Optional[str] = None  # None для base плана (навсегда)
+    days_left: Optional[int] = None  # None для base плана
     started_at: Optional[str] = None
+    can_search_online: bool = True  # False для base плана
 
 
 class RequestLimits(BaseModel):
@@ -31,8 +32,11 @@ class SubscriptionStatus(BaseModel):
     """Полный статус подписки пользователя"""
     subscription: Optional[SubscriptionInfo] = None
     limits: RequestLimits
-    is_trial_expired: bool
-    is_pro: bool
+    # Флаги планов
+    is_pro_trial: bool = False  # На Pro Trial (7 дней)
+    is_base: bool = False  # На Base (бесплатный навсегда)
+    is_pro: bool = False  # На Pro (платная подписка)
+    is_pro_trial_expired: bool = False  # Pro Trial истёк, показать модалку
 
 
 class SubscriptionService:
@@ -69,16 +73,22 @@ class SubscriptionService:
                     data = response.json()
                     if data and len(data) > 0:
                         sub = data[0]
-                        expires_at = datetime.fromisoformat(sub["expires_at"].replace("Z", "+00:00"))
-                        now = datetime.now(expires_at.tzinfo)
-                        days_left = max(0, (expires_at - now).days)
+
+                        # Для base плана expires_at может быть NULL
+                        expires_at_str = sub.get("expires_at")
+                        days_left = None
+                        if expires_at_str:
+                            expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+                            now = datetime.now(expires_at.tzinfo)
+                            days_left = max(0, (expires_at - now).days)
 
                         return SubscriptionInfo(
                             plan=sub["plan"],
                             status=sub["status"],
-                            expires_at=sub["expires_at"],
+                            expires_at=expires_at_str,
                             days_left=days_left,
                             started_at=sub.get("started_at"),
+                            can_search_online=sub.get("can_search_online", True),
                         )
                 return None
         except Exception as e:
@@ -148,21 +158,31 @@ class SubscriptionService:
         subscription = await self.get_subscription(user_id)
         limits = await self.get_limits(user_id)
 
-        is_trial_expired = False
+        is_pro_trial = False
+        is_base = False
         is_pro = False
+        is_pro_trial_expired = False
 
         if subscription:
-            is_pro = subscription.plan == "pro" and subscription.status == "active"
-            is_trial_expired = (
-                subscription.plan == "trial"
-                and (subscription.status == "expired" or subscription.days_left <= 0)
-            )
+            plan = subscription.plan
+            status = subscription.status
+
+            # Определяем текущий план
+            is_pro_trial = plan == "pro_trial" and status == "active"
+            is_base = plan == "base"
+            is_pro = plan == "pro" and status == "active"
+
+            # Pro Trial истёк = сейчас на base (после истечения pro_trial)
+            # Показываем модалку только при переходе на base
+            is_pro_trial_expired = is_base
 
         return SubscriptionStatus(
             subscription=subscription,
             limits=limits,
-            is_trial_expired=is_trial_expired,
+            is_pro_trial=is_pro_trial,
+            is_base=is_base,
             is_pro=is_pro,
+            is_pro_trial_expired=is_pro_trial_expired,
         )
 
     async def check_and_use_request(self, user_id: str) -> tuple[bool, str]:
@@ -174,22 +194,26 @@ class SubscriptionService:
             # Получаем статус
             status = await self.get_full_status(user_id)
 
-            # Проверяем подписку
-            if status.is_trial_expired:
-                return False, "Пробный период закончился. Оформите подписку Pro."
-
             if not status.subscription:
                 return False, "Подписка не найдена. Пожалуйста, зарегистрируйтесь."
 
-            if status.subscription.status == "expired":
-                return False, "Подписка истекла. Продлите подписку Pro."
+            plan = status.subscription.plan
+            sub_status = status.subscription.status
 
-            if status.subscription.status == "cancelled":
+            # Pro подписка истекла
+            if plan == "pro" and sub_status == "expired":
+                return False, "Подписка Pro истекла. Продлите подписку."
+
+            if sub_status == "cancelled":
                 return False, "Подписка отменена. Оформите новую подписку."
 
-            # Проверяем лимиты
+            # Все активные планы (pro_trial, base, pro) могут использовать запросы
+            # Просто проверяем лимиты
             if not status.limits.can_use:
-                return False, "Лимит запросов исчерпан. Докупите запросы или подождите до завтра."
+                if status.is_base:
+                    return False, "Лимит запросов исчерпан. Оформите Pro для большего количества запросов."
+                else:
+                    return False, "Лимит запросов исчерпан. Докупите запросы или подождите до завтра."
 
             # Используем запрос
             await self._use_request(user_id, status.limits)
@@ -265,6 +289,7 @@ class SubscriptionService:
                         "started_at": now.isoformat(),
                         "expires_at": expires_at.isoformat(),
                         "yookassa_payment_id": payment_id,
+                        "can_search_online": True,  # Pro имеет доступ к поиску в сети
                         "updated_at": now.isoformat(),
                     },
                     headers=self._headers(),
@@ -319,37 +344,38 @@ class SubscriptionService:
             print(f"[Subscription] add_bonus_requests error: {e}")
             return False
 
-    async def create_trial(self, user_id: str) -> bool:
-        """Создать триал подписку для нового пользователя"""
+    async def create_pro_trial(self, user_id: str) -> bool:
+        """Создать Pro Trial подписку для нового пользователя (7 дней)"""
         try:
             async with httpx.AsyncClient() as client:
                 now = datetime.utcnow()
-                expires_at = now + timedelta(days=self.settings.trial_days)
+                expires_at = now + timedelta(days=self.settings.pro_trial_days)
 
-                # Создаём подписку
+                # Создаём подписку Pro Trial
                 response = await client.post(
                     f"{self.base_url}/rest/v1/user_subscriptions",
                     json={
                         "user_id": user_id,
-                        "plan": "trial",
+                        "plan": "pro_trial",
                         "status": "active",
                         "started_at": now.isoformat(),
                         "expires_at": expires_at.isoformat(),
+                        "can_search_online": True,  # Pro Trial имеет полный доступ
                     },
                     headers=self._headers(),
                     timeout=10.0,
                 )
 
                 if response.status_code not in [200, 201]:
-                    print(f"[Subscription] create_trial subscription failed: {response.text}")
+                    print(f"[Subscription] create_pro_trial subscription failed: {response.text}")
                     return False
 
-                # Создаём лимиты
+                # Создаём лимиты (15 запросов/день как у Pro)
                 response = await client.post(
                     f"{self.base_url}/rest/v1/user_request_limits",
                     json={
                         "user_id": user_id,
-                        "daily_limit": self.settings.trial_daily_limit,
+                        "daily_limit": self.settings.pro_trial_daily_limit,
                         "daily_used": 0,
                         "daily_reset_at": date.today().isoformat(),
                         "bonus_requests": 0,
@@ -361,7 +387,50 @@ class SubscriptionService:
                 return response.status_code in [200, 201]
 
         except Exception as e:
-            print(f"[Subscription] create_trial error: {e}")
+            print(f"[Subscription] create_pro_trial error: {e}")
+            return False
+
+    async def downgrade_to_base(self, user_id: str) -> bool:
+        """Перевести пользователя на Base план (после истечения Pro Trial)"""
+        try:
+            async with httpx.AsyncClient() as client:
+                now = datetime.utcnow()
+
+                # Обновляем подписку на Base
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/user_subscriptions",
+                    params={"user_id": f"eq.{user_id}"},
+                    json={
+                        "plan": "base",
+                        "status": "active",
+                        "expires_at": None,  # Base навсегда
+                        "can_search_online": False,  # Только лента
+                        "updated_at": now.isoformat(),
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                if response.status_code not in [200, 204]:
+                    print(f"[Subscription] downgrade_to_base failed: {response.text}")
+                    return False
+
+                # Обновляем лимиты на Base (3 запроса/день)
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/user_request_limits",
+                    params={"user_id": f"eq.{user_id}"},
+                    json={
+                        "daily_limit": self.settings.base_daily_limit,
+                        "updated_at": now.isoformat(),
+                    },
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                return response.status_code in [200, 204]
+
+        except Exception as e:
+            print(f"[Subscription] downgrade_to_base error: {e}")
             return False
 
     async def save_payment(
