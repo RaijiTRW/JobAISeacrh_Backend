@@ -313,6 +313,9 @@ async def send_message_stream(request: ChatMessageRequest):
             total_found += db_result.total_found
 
             # 4.2: Валидация БД
+            # Добавляем ВСЕ ID из БД в seen_ids (чтобы не было дубликатов)
+            seen_ids.update(v.id for v in db_result.vacancies)
+
             db_validation = await validator.validate_batch(
                 db_result.vacancies,
                 preferences,
@@ -321,7 +324,6 @@ async def send_message_stream(request: ChatMessageRequest):
             )
             all_validated.extend(db_validation.validated)
             all_rejected.extend(db_validation.rejected)
-            seen_ids.update(v.id for v in all_validated)
 
             # Отправляем результаты БД сразу
             if db_validation.validated:
@@ -343,8 +345,11 @@ async def send_message_stream(request: ChatMessageRequest):
             )
             total_found += len(fast_result)
 
-            # Валидация быстрых результатов
+            # Валидация быстрых результатов (исключаем дубликаты)
             unique_fast = [v for v in fast_result if v.id not in seen_ids]
+            # Добавляем ID в seen_ids ДО валидации
+            seen_ids.update(v.id for v in unique_fast)
+
             if unique_fast:
                 fast_validation = await validator.validate_batch(
                     unique_fast,
@@ -354,7 +359,6 @@ async def send_message_stream(request: ChatMessageRequest):
                 )
                 all_validated.extend(fast_validation.validated)
                 all_rejected.extend(fast_validation.rejected)
-                seen_ids.update(v.id for v in fast_validation.validated)
 
                 # Отправляем HH + SuperJob сразу
                 if fast_validation.validated:
@@ -378,8 +382,11 @@ async def send_message_stream(request: ChatMessageRequest):
                 avito_result = await avito_parser.search(avito_filters, limit=200)
                 total_found += len(avito_result)
 
-                # Валидация Avito
+                # Валидация Avito (исключаем дубликаты)
                 unique_avito = [v for v in avito_result if v.id not in seen_ids]
+                # Добавляем ID в seen_ids ДО валидации
+                seen_ids.update(v.id for v in unique_avito)
+
                 if unique_avito:
                     avito_validation = await validator.validate_batch(
                         unique_avito,

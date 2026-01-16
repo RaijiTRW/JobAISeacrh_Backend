@@ -110,9 +110,19 @@ class VacancyValidator:
                 title_lower = (vacancy.title or "").lower()
                 desc_lower = (vacancy.description or "").lower()
 
-                # Проверяем на удалёнку
-                is_remote = any(word in title_lower or word in desc_lower for word in
-                    ["удалён", "удаленн", "remote", "дистанцион", "из дома", "работа из любого города"])
+                # Проверяем на удалёнку (СТРОГО - только если явно указано "полностью удалённо")
+                # Не считаем удалённой, если просто "возможна удалённая работа"
+                remote_keywords_strict = [
+                    "полностью удал",
+                    "100% удал",
+                    "только удал",
+                    "remote only",
+                    "из любого города",
+                    "из любой точки",
+                    "работа на дому",
+                    "home office",
+                ]
+                is_remote = any(word in title_lower for word in remote_keywords_strict)
 
                 # Если город вакансии не указан
                 if not vacancy_city:
@@ -156,7 +166,7 @@ class VacancyValidator:
             return ValidationResult(validated=[], rejected=user_rejected, suggested_keywords=[])
 
         # AI валидация с confidence
-        ai_result = await self._ai_validate_with_confidence(to_validate, queries_text)
+        ai_result = await self._ai_validate_with_confidence(to_validate, queries_text, required_city)
 
         # Объединяем rejected
         all_rejected = user_rejected + ai_result.rejected
@@ -171,7 +181,7 @@ class VacancyValidator:
         )
 
     async def _ai_validate_with_confidence(
-        self, vacancies: list[Vacancy], user_query: str
+        self, vacancies: list[Vacancy], user_query: str, required_city: str = None
     ) -> ValidationResult:
         """AI оценивает каждую вакансию с confidence score"""
         validated = []
@@ -181,7 +191,7 @@ class VacancyValidator:
 
         for i in range(0, len(vacancies), batch_size):
             batch = vacancies[i:i + batch_size]
-            scores, keywords = await self._ask_ai_confidence(batch, user_query)
+            scores, keywords = await self._ask_ai_confidence(batch, user_query, required_city)
 
             suggested_keywords.extend(keywords)
 
@@ -206,16 +216,17 @@ class VacancyValidator:
         )
 
     async def _ask_ai_confidence(
-        self, vacancies: list[Vacancy], user_query: str
+        self, vacancies: list[Vacancy], user_query: str, required_city: str = None
     ) -> tuple[dict, list[str]]:
         """AI возвращает confidence score для каждой вакансии"""
 
         vacancy_list = []
         for v in vacancies:
             desc = (v.description[:200] if v.description else '').replace('\n', ' ')
-            vacancy_list.append(f"ID: {v.id}\nНазвание: {v.title}\nКомпания: {v.company}\nОписание: {desc}\n")
+            vacancy_list.append(f"ID: {v.id}\nНазвание: {v.title}\nГород: {v.city}\nКомпания: {v.company}\nОписание: {desc}\n")
 
-        prompt = f"""Человек ищет работу: "{user_query}"
+        city_info = f"\nТребуемый город: {required_city}" if required_city else ""
+        prompt = f"""Человек ищет работу: "{user_query}"{city_info}
 
 Оцени каждую вакансию — насколько она подходит под запрос.
 
@@ -224,6 +235,7 @@ class VacancyValidator:
 2. "ПВЗ" = "пункт выдачи" = "выдача заказов" = "Wildberries/Ozon пункт"
 3. Если вакансия МОЖЕТ подойти — ставь confidence >= 0.5
 4. Отсеивай только явно НЕ ТО (курьер когда ищут ПВЗ, продавец когда ищут программиста)
+5. ВАЖНО: Город вакансии должен совпадать с требуемым городом (кроме 100% удалённых вакансий)
 
 ВАКАНСИИ:
 {chr(10).join(vacancy_list)}
