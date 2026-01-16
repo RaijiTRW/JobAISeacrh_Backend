@@ -126,6 +126,41 @@ class VacancySearchTool:
 
         return unique
 
+    async def _search_live_fast(self, filters: SearchFilters) -> list[Vacancy]:
+        """Быстрый поиск — только HH + SuperJob (БЕЗ Avito)"""
+        queries = filters.queries
+
+        hh_parser = self.parsers[0]  # HHParser
+        sj_parser = self.parsers[2]  # SuperJobParser
+
+        # HH и SuperJob параллельно
+        parallel_tasks = []
+        for query in queries:
+            single_filter = SearchFilters(
+                query=query,
+                city=filters.city,
+                salary_from=filters.salary_from,
+                salary_to=filters.salary_to,
+                experience=filters.experience,
+                employment_type=filters.employment_type,
+                exclude_keywords=filters.exclude_keywords,
+            )
+            parallel_tasks.append(hh_parser.search(single_filter, limit=self.settings.max_vacancies_per_source))
+            parallel_tasks.append(sj_parser.search(single_filter, limit=self.settings.max_vacancies_per_source))
+
+        print(f"[Search] Fast search: HH + SuperJob ({len(parallel_tasks)} tasks)")
+        parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+
+        # Собираем результаты
+        all_vacancies: list[Vacancy] = []
+        for result in parallel_results:
+            if isinstance(result, list):
+                all_vacancies.extend(result)
+            elif isinstance(result, Exception):
+                print(f"[Search] Fast parser error: {result}")
+
+        return all_vacancies
+
     async def _search_live(self, filters: SearchFilters, only_sources: set[str] = None) -> list[Vacancy]:
         """Live-парсинг с сайтов. only_sources - если указан, парсим только эти источники."""
         queries = filters.queries

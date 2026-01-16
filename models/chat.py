@@ -35,6 +35,7 @@ class UserPreferences(BaseModel):
     experience: Optional[str] = None
     employment_type: Optional[str] = None
     exclude_keywords: list[str] = []
+    asked_salary: bool = False  # Флаг: спрашивали ли про зарплату
 
     def is_complete(self) -> bool:
         """Достаточно ли данных для поиска"""

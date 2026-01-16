@@ -35,13 +35,28 @@ class AvitoParser(BaseParser):
     ]
 
     USER_AGENTS = [
+        # Desktop Chrome
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+
+        # Desktop Firefox
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
+
+        # Desktop Safari
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+
+        # Desktop Edge
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+
+        # Mobile (Android)
+        "Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+
+        # Mobile (iOS)
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
     ]
 
     @classmethod
@@ -158,11 +173,48 @@ class AvitoParser(BaseParser):
                 soup = BeautifulSoup(response.text, "html.parser")
                 items = self._find_items(soup)
 
+                # === ЧЕЛОВЕКОПОДОБНОЕ ПОВЕДЕНИЕ ===
+                # 1. Начальная пауза (загрузка страницы, прокрутка)
+                initial_delay = random.uniform(2.0, 4.0)
+                print(f"[Avito] Page loaded, scrolling... ({initial_delay:.1f}s)")
+                await asyncio.sleep(initial_delay)
+
                 city_slug = self._get_city_slug(filters.city)
-                for item in items:
+
+                # 2. Иногда смотрим вакансии в случайном порядке (30% вероятность)
+                if random.random() < 0.3:
+                    print(f"[Avito] Randomizing viewing order (human-like)")
+                    items = items.copy()
+                    random.shuffle(items)
+
+                # 3. Имитация чтения каждой вакансии
+                for i, item in enumerate(items):
+                    # Иногда "пропускаем" вакансию быстро (10% вероятность)
+                    # Как будто заголовок неинтересный
+                    quick_skip = random.random() < 0.1
+
+                    # Парсим вакансию
                     vacancy = self._parse_vacancy(item, filters.city or city_slug)
                     if vacancy and self.matches_filters(vacancy, filters):
                         vacancies.append(vacancy)
+
+                    # Задержка между вакансиями
+                    if i < len(items) - 1:  # Не ждём после последней
+                        if quick_skip:
+                            # Быстро пролистали
+                            read_delay = random.uniform(1.5, 3.0)
+                            print(f"[Avito] Quick skip {i+1}/{len(items)} ({read_delay:.1f}s)")
+                        else:
+                            # Нормальное чтение: 7-10 секунд
+                            read_delay = random.uniform(7.0, 10.0)
+                            print(f"[Avito] Reading {i+1}/{len(items)} ({read_delay:.1f}s)")
+
+                        # Каждую 5-ю вакансию — длинная пауза (отвлеклись)
+                        if (i + 1) % 5 == 0:
+                            read_delay = random.uniform(20.0, 30.0)
+                            print(f"[Avito] Micro-break after {i+1} items ({read_delay:.1f}s)")
+
+                        await asyncio.sleep(read_delay)
 
                 print(f"[Avito] Page {page}: parsed {len(vacancies)} vacancies")
 
