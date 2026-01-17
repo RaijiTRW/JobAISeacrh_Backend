@@ -411,9 +411,13 @@ async def send_message_stream(request: ChatMessageRequest):
                     yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(unique_fast)} из HH/SuperJob) '})}\n\n"
 
             # 4.4: Медленный поиск Avito (в фоне, стримим по мере готовности)
+            # ВАЖНО: Ограничиваем до 20 вакансий и 180 сек для live-поиска (чтобы не было timeout)
             from tools.parsers.avito import AvitoParser
             avito_parser = AvitoParser()
             try:
+                # Отправляем heartbeat перед долгой операцией
+                yield f"data: {json.dumps({'type': 'progress', 'message': 'Ищу на Avito...'})}\n\n"
+
                 avito_filters = SearchFilters(
                     query=queries[0] if queries else "",
                     city=preferences.city,
@@ -424,7 +428,12 @@ async def send_message_stream(request: ChatMessageRequest):
                     exclude_keywords=preferences.exclude_keywords,
                     exclude_vacancy_ids=request.exclude_vacancy_ids,
                 )
-                avito_result = await avito_parser.search(avito_filters, limit=200)
+                # Лимит 20 для live-поиска (scheduler использует 200)
+                # Timeout 180 сек (3 минуты максимум)
+                avito_result = await asyncio.wait_for(
+                    avito_parser.search(avito_filters, limit=20),
+                    timeout=180.0
+                )
                 total_found += len(avito_result)
 
                 # Валидация Avito (исключаем дубликаты)
