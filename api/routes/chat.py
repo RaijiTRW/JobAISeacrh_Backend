@@ -270,6 +270,7 @@ async def send_message_stream(request: ChatMessageRequest):
             request.message,
             session["preferences"],
             user_data,
+            session["history"],  # Передаем историю для контекста
         )
         session["preferences"] = preferences
 
@@ -311,6 +312,7 @@ async def send_message_stream(request: ChatMessageRequest):
                 experience=preferences.experience,
                 employment_type=preferences.employment_type,
                 exclude_keywords=preferences.exclude_keywords,
+                exclude_vacancy_ids=request.exclude_vacancy_ids,
                 search_in_feed=True,
                 search_online=False,
             )
@@ -346,6 +348,7 @@ async def send_message_stream(request: ChatMessageRequest):
                     experience=preferences.experience,
                     employment_type=preferences.employment_type,
                     exclude_keywords=preferences.exclude_keywords,
+                    exclude_vacancy_ids=request.exclude_vacancy_ids,
                 )
             )
             total_found += len(fast_result)
@@ -383,6 +386,7 @@ async def send_message_stream(request: ChatMessageRequest):
                     experience=preferences.experience,
                     employment_type=preferences.employment_type,
                     exclude_keywords=preferences.exclude_keywords,
+                    exclude_vacancy_ids=request.exclude_vacancy_ids,
                 )
                 avito_result = await avito_parser.search(avito_filters, limit=200)
                 total_found += len(avito_result)
@@ -421,6 +425,7 @@ async def send_message_stream(request: ChatMessageRequest):
                 experience=preferences.experience,
                 employment_type=preferences.employment_type,
                 exclude_keywords=preferences.exclude_keywords,
+                exclude_vacancy_ids=request.exclude_vacancy_ids,
                 search_in_feed=request.search_in_feed,
                 search_online=request.search_online,
             )
