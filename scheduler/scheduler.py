@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 
-from scheduler.jobs import run_parsing, run_avito_parsing, run_verification, run_mass_parsing
+from scheduler.jobs import run_parsing, run_avito_parsing, run_verification, run_mass_parsing, run_moderation
 from scheduler.human_behavior import is_working_hours
 from services.scheduler_service import scheduler_service
 
@@ -100,6 +100,16 @@ async def verification_job_wrapper():
         print(f"[Scheduler] Verification error: {e}")
 
 
+async def moderation_job_wrapper():
+    """Wrapper для AI модерации контента"""
+    print(f"[Scheduler] Starting content moderation job at {datetime.now()}")
+    try:
+        stats = await run_moderation()
+        print(f"[Scheduler] Moderation completed: {stats.get('checked', 0)} checked, {stats.get('approved', 0)} approved, {stats.get('rejected', 0)} rejected")
+    except Exception as e:
+        print(f"[Scheduler] Moderation error: {e}")
+
+
 async def volume_stats_wrapper():
     """Wrapper для записи статистики объёма вакансий (для графика)"""
     print(f"[Scheduler] Recording volume stats at {datetime.now()}")
@@ -138,6 +148,15 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=1),
         id="verification_job",
         name="Vacancy Verification",
+        replace_existing=True,
+    )
+
+    # AI модерация контента каждый час
+    sched.add_job(
+        moderation_job_wrapper,
+        trigger=IntervalTrigger(hours=1),
+        id="moderation_job",
+        name="Content Moderation",
         replace_existing=True,
     )
 
@@ -204,3 +223,9 @@ async def trigger_verification_now():
     """Запустить верификацию вручную (для тестирования)"""
     print("[Scheduler] Manual verification triggered")
     return await run_verification()
+
+
+async def trigger_moderation_now():
+    """Запустить AI модерацию вручную (для тестирования)"""
+    print("[Scheduler] Manual moderation triggered")
+    return await run_moderation()

@@ -11,6 +11,7 @@ from config import get_settings
 from api.routes import chat
 from api.routes import vacancies
 from api.routes import scheduler as scheduler_routes
+from api.routes import employer_moderation
 from scheduler import start_scheduler, shutdown_scheduler
 
 
@@ -51,10 +52,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routes (только AI поиск и scheduler, остальное на Next.js)
+# Routes (AI поиск, scheduler, модерация вакансий работодателей)
 app.include_router(chat.router, prefix="/api")
 app.include_router(vacancies.router, prefix="/api/vacancies")
 app.include_router(scheduler_routes.router)
+app.include_router(employer_moderation.router)
 
 
 @app.get("/")

@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from config import get_settings
-from models.vacancy import SearchFilters
+from models.vacancy import SearchFilters, Vacancy
 from tools.parsers.hh import HHParser
 from tools.parsers.avito import AvitoParser
 from tools.parsers.superjob import SuperJobParser
@@ -32,6 +32,32 @@ from scheduler.human_behavior import (
     smart_delay,
     micro_break,
 )
+
+
+# Военные ключевые слова для фильтрации
+MILITARY_KEYWORDS = [
+    "военн",  # военный, военнослужащий, военная
+    "бпла",
+    "беспилотн",
+    "дрон",
+    "военкомат",
+    "контракт сво",
+    "участни",  # участник СВО
+    "мобилизац",
+    "армия",
+    "военная служба",
+    "военная часть",
+    "военное",
+    "войск",  # войсковая часть
+    "обороны",  # министерство обороны
+    "казарм",
+]
+
+
+def is_military_vacancy(vacancy: Vacancy) -> bool:
+    """Проверка на военную тематику"""
+    full_text = f"{(vacancy.title or '').lower()} {(vacancy.description or '').lower()}"
+    return any(keyword in full_text for keyword in MILITARY_KEYWORDS)
 
 
 class ParsingJob:
@@ -142,8 +168,11 @@ class ParsingJob:
             vacancies = await parser.search(filters, limit=batch_size)
             stats["parsed"] = len(vacancies)
 
-            # Сохраняем в БД
+            # Фильтруем военную тематику и сохраняем в БД
             for vacancy in vacancies:
+                if is_military_vacancy(vacancy):
+                    print(f"[ParsingJob] Skipped military vacancy: {vacancy.title}")
+                    continue
                 if await vacancy_storage_service.save_vacancy(vacancy):
                     stats["saved"] += 1
 
@@ -280,8 +309,11 @@ class MassParsingJob:
             vacancies = await parser.search(filters, limit=batch_size)
             stats["parsed"] = len(vacancies)
 
-            # Сохраняем в БД
+            # Фильтруем военную тематику и сохраняем в БД
             for vacancy in vacancies:
+                if is_military_vacancy(vacancy):
+                    print(f"[ParsingJob] Skipped military vacancy: {vacancy.title}")
+                    continue
                 if await vacancy_storage_service.save_vacancy(vacancy):
                     stats["saved"] += 1
 
@@ -340,7 +372,11 @@ class AvitoParsingJob:
                         vacancies = await self.avito_parser.search(filters, limit=10)
                         stats["parsed"] += len(vacancies)
 
+                        # Фильтруем военную тематику и сохраняем
                         for vacancy in vacancies:
+                            if is_military_vacancy(vacancy):
+                                print(f"[AvitoJob] Skipped military vacancy: {vacancy.title}")
+                                continue
                             if await vacancy_storage_service.save_vacancy(vacancy):
                                 stats["saved"] += 1
 
@@ -494,11 +530,130 @@ class VerificationJob:
             return True
 
 
+class ModerationJob:
+    """
+    Job для модерации контента вакансий с помощью AI.
+    Проверяет вакансии на запрещённый контент (военная тематика и т.д.).
+    Запускается каждый час.
+    """
+
+    def __init__(self):
+        self.is_running = False
+
+    async def run(self) -> dict:
+        """
+        Запустить модерацию вакансий.
+        Возвращает статистику.
+        """
+        if self.is_running:
+            print("[ModerationJob] Already running, skipping...")
+            return {"status": "skipped", "reason": "already_running"}
+
+        self.is_running = True
+        start_time = datetime.now()
+        stats = {
+            "started_at": start_time.isoformat(),
+            "checked": 0,
+            "rejected": 0,
+            "approved": 0,
+            "errors": [],
+        }
+
+        print(f"[ModerationJob] Starting content moderation at {start_time}")
+
+        try:
+            from agents.content_moderator import ContentModerator
+
+            moderator = ContentModerator()
+
+            # Умная выборка вакансий для проверки:
+            # 1. Новые (за последние 24 часа) - ПРИОРИТЕТ
+            # 2. Старые непроверенные (moderation_checked_at IS NULL)
+            vacancies = await vacancy_storage_service.get_vacancies_for_moderation(limit=500)
+
+            if not vacancies:
+                print("[ModerationJob] No vacancies to moderate")
+                self.is_running = False
+                return {
+                    **stats,
+                    "status": "completed",
+                    "ended_at": datetime.now().isoformat(),
+                }
+
+            print(f"[ModerationJob] Found {len(vacancies)} vacancies to check")
+            stats["checked"] = len(vacancies)
+
+            # Проверяем батчами по 50 вакансий (чтобы не перегружать AI)
+            batch_size = 50
+            total_rejected = 0
+            total_approved = 0
+
+            for i in range(0, len(vacancies), batch_size):
+                batch = vacancies[i : i + batch_size]
+                batch_num = i // batch_size + 1
+                total_batches = (len(vacancies) + batch_size - 1) // batch_size
+                print(f"[ModerationJob] Checking batch {batch_num}/{total_batches}")
+
+                # Проверяем батч
+                result = await moderator.check_vacancies(batch)
+
+                approved = result.get("approved", [])
+                rejected = result.get("rejected", [])
+
+                # Помечаем отклонённые вакансии как неактивные
+                for vacancy in rejected:
+                    try:
+                        await vacancy_storage_service.deactivate_vacancy(vacancy.id)
+                        total_rejected += 1
+                    except Exception as e:
+                        print(f"[ModerationJob] Failed to deactivate {vacancy.id}: {e}")
+                        stats["errors"].append(f"Failed to deactivate {vacancy.id}")
+
+                # Помечаем одобренные вакансии как проверенные
+                for vacancy in approved:
+                    try:
+                        await vacancy_storage_service.mark_moderation_checked(vacancy.id)
+                        total_approved += 1
+                    except Exception as e:
+                        print(f"[ModerationJob] Failed to mark {vacancy.id}: {e}")
+                        stats["errors"].append(f"Failed to mark {vacancy.id}")
+
+                # Небольшая задержка между батчами
+                if i + batch_size < len(vacancies):
+                    await asyncio.sleep(2)
+
+            stats["rejected"] = total_rejected
+            stats["approved"] = total_approved
+            stats["ended_at"] = datetime.now().isoformat()
+            stats["duration_seconds"] = (datetime.now() - start_time).total_seconds()
+
+            # Получаем статистику остатка
+            moderation_stats = await vacancy_storage_service.get_moderation_stats()
+            stats["remaining_unchecked"] = moderation_stats.get("unchecked", 0)
+
+            print(
+                f"[ModerationJob] Completed: {stats['approved']} approved, {stats['rejected']} rejected"
+            )
+            print(
+                f"[ModerationJob] Remaining unchecked: {stats['remaining_unchecked']} vacancies"
+            )
+
+        except Exception as e:
+            print(f"[ModerationJob] Error: {e}")
+            stats["errors"].append(str(e))
+            stats["status"] = "error"
+        finally:
+            self.is_running = False
+
+        return stats
+
+
 # Singleton instances
 parsing_job = ParsingJob()
 avito_job = AvitoParsingJob()
 verification_job = VerificationJob()
 mass_parsing_job = MassParsingJob()  # Новый массовый парсинг
+moderation_job = ModerationJob()  # Модерация контента
 
 
 async def run_parsing():
@@ -629,6 +784,39 @@ async def run_mass_parsing():
     await scheduler_service.save_job_history(
         job_id="mass_parsing_job",
         job_name="Mass HH/SuperJob Parsing",
+        status=status,
+        started_at=start_time,
+        ended_at=end_time,
+        stats=stats,
+    )
+
+    return stats
+
+
+async def run_moderation():
+    """Wrapper для запуска модерации контента с сохранением истории"""
+    from services.scheduler_service import scheduler_service
+
+    # Проверяем, не на паузе ли джоб
+    state = await scheduler_service.get_job_state("moderation_job")
+    if state.get("is_paused"):
+        print("[ModerationJob] Job is paused, skipping...")
+        return {"status": "skipped", "reason": "paused"}
+
+    start_time = datetime.now()
+    stats = await moderation_job.run()
+    end_time = datetime.now()
+
+    # Сохраняем в историю
+    status = "completed"
+    if stats.get("errors"):
+        status = "completed_with_errors"
+    if stats.get("status") == "skipped":
+        status = "skipped"
+
+    await scheduler_service.save_job_history(
+        job_id="moderation_job",
+        job_name="Content Moderation",
         status=status,
         started_at=start_time,
         ended_at=end_time,

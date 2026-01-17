@@ -389,6 +389,73 @@ class VacancyStorageService:
             print(f"[Storage] Verification get exception: {e}")
             return []
 
+    async def get_vacancies_for_moderation(self, limit: int = 500) -> list[Vacancy]:
+        """
+        Умная выборка вакансий для модерации с приоритизацией:
+        1. Новые вакансии (созданные за последние 24 часа) - ПРИОРИТЕТ
+        2. Старые непроверенные (moderation_checked_at IS NULL)
+
+        Возвращает до limit активных вакансий.
+        """
+        try:
+            from datetime import timedelta
+
+            all_vacancies = []
+
+            # ПРИОРИТЕТ 1: Новые вакансии за последние 24 часа
+            cutoff_time = datetime.utcnow() - timedelta(hours=24)
+            cutoff_iso = cutoff_time.isoformat()
+
+            async with httpx.AsyncClient() as client:
+                # Получаем новые вакансии
+                response = await client.get(
+                    f"{self.base_url}/rest/v1/{self.table}",
+                    params={
+                        "select": "*",
+                        "is_active": "eq.true",
+                        "created_at": f"gte.{cutoff_iso}",
+                        "order": "created_at.desc",
+                        "limit": str(limit),
+                    },
+                    headers=self._headers(),
+                    timeout=15.0,
+                )
+
+                if response.status_code == 200:
+                    new_vacancies = [StoredVacancy(**row) for row in response.json()]
+                    all_vacancies.extend(new_vacancies)
+                    print(f"[Storage] Found {len(new_vacancies)} new vacancies (last 24h)")
+
+                # Если новых мало - добираем старые непроверенные
+                remaining = limit - len(all_vacancies)
+                if remaining > 0:
+                    response = await client.get(
+                        f"{self.base_url}/rest/v1/{self.table}",
+                        params={
+                            "select": "*",
+                            "is_active": "eq.true",
+                            "moderation_checked_at": "is.null",
+                            "order": "created_at.asc",  # Старые первыми
+                            "limit": str(remaining),
+                        },
+                        headers=self._headers(),
+                        timeout=15.0,
+                    )
+
+                    if response.status_code == 200:
+                        old_vacancies = [StoredVacancy(**row) for row in response.json()]
+                        all_vacancies.extend(old_vacancies)
+                        print(f"[Storage] Found {len(old_vacancies)} old unchecked vacancies")
+
+                # Конвертируем в Vacancy
+                result = [self.to_vacancy(sv) for sv in all_vacancies]
+                print(f"[Storage] Total for moderation: {len(result)} vacancies")
+                return result
+
+        except Exception as e:
+            print(f"[Storage] Moderation get exception: {e}")
+            return []
+
     async def mark_inactive(self, vacancy_id: str) -> bool:
         """Пометить вакансию как неактивную"""
         try:
@@ -408,6 +475,46 @@ class VacancyStorageService:
 
         except Exception as e:
             print(f"[Storage] Mark inactive exception: {e}")
+            return False
+
+    async def deactivate_vacancy(self, vacancy_id: str) -> bool:
+        """Деактивировать вакансию + отметить время модерации"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/{self.table}",
+                    params={"id": f"eq.{vacancy_id}"},
+                    headers=self._headers(),
+                    json={
+                        "is_active": False,
+                        "last_checked_at": datetime.utcnow().isoformat(),
+                        "moderation_checked_at": datetime.utcnow().isoformat(),
+                    },
+                    timeout=10.0,
+                )
+
+                return response.status_code in (200, 204)
+
+        except Exception as e:
+            print(f"[Storage] Deactivate exception: {e}")
+            return False
+
+    async def mark_moderation_checked(self, vacancy_id: str) -> bool:
+        """Отметить вакансию как проверенную модерацией"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/{self.table}",
+                    params={"id": f"eq.{vacancy_id}"},
+                    headers=self._headers(),
+                    json={"moderation_checked_at": datetime.utcnow().isoformat()},
+                    timeout=10.0,
+                )
+
+                return response.status_code in (200, 204)
+
+        except Exception as e:
+            print(f"[Storage] Mark moderation exception: {e}")
             return False
 
     async def update_last_checked(self, vacancy_id: str) -> bool:
@@ -463,6 +570,50 @@ class VacancyStorageService:
         except Exception as e:
             print(f"[Storage] Stats exception: {e}")
             return {"active": 0, "inactive": 0, "total": 0}
+
+    async def get_moderation_stats(self) -> dict:
+        """Получить статистику модерации"""
+        try:
+            async with httpx.AsyncClient() as client:
+                # Непроверенные (активные без moderation_checked_at)
+                unchecked_resp = await client.get(
+                    f"{self.base_url}/rest/v1/{self.table}",
+                    params={
+                        "select": "id",
+                        "is_active": "eq.true",
+                        "moderation_checked_at": "is.null",
+                    },
+                    headers={**self._headers(), "Prefer": "count=exact"},
+                    timeout=10.0,
+                )
+                unchecked_count = 0
+                if unchecked_resp.status_code in (200, 206) and "content-range" in unchecked_resp.headers:
+                    unchecked_count = int(unchecked_resp.headers["content-range"].split("/")[1])
+
+                # Проверенные
+                checked_resp = await client.get(
+                    f"{self.base_url}/rest/v1/{self.table}",
+                    params={
+                        "select": "id",
+                        "is_active": "eq.true",
+                        "moderation_checked_at": "not.is.null",
+                    },
+                    headers={**self._headers(), "Prefer": "count=exact"},
+                    timeout=10.0,
+                )
+                checked_count = 0
+                if checked_resp.status_code in (200, 206) and "content-range" in checked_resp.headers:
+                    checked_count = int(checked_resp.headers["content-range"].split("/")[1])
+
+                return {
+                    "unchecked": unchecked_count,
+                    "checked": checked_count,
+                    "total_active": unchecked_count + checked_count,
+                }
+
+        except Exception as e:
+            print(f"[Storage] Moderation stats exception: {e}")
+            return {"unchecked": 0, "checked": 0, "total_active": 0}
 
     def to_vacancy(self, stored: StoredVacancy) -> Vacancy:
         """Конвертировать StoredVacancy в Vacancy"""

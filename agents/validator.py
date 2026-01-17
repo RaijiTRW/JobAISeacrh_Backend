@@ -140,9 +140,33 @@ class VacancyValidator:
                         user_rejected.append(vacancy)
                         continue
 
-            # === ПРОВЕРКА ИСКЛЮЧЕНИЙ ===
+            # === ПРОВЕРКА ВОЕННОЙ ТЕМАТИКИ (автофильтр) ===
+            military_keywords = [
+                "военн",  # военный, военнослужащий, военная
+                "бпла",
+                "беспилотн",
+                "дрон",
+                "военкомат",
+                "контракт сво",
+                "участни",  # участник СВО
+                "мобилизац",
+                "армия",
+                "военная служба",
+                "военная часть",
+                "военное",
+                "войск",  # войсковая часть
+                "обороны",  # министерство обороны
+                "казарм",
+            ]
+            full_text = f"{(vacancy.title or '').lower()} {(vacancy.description or '').lower()}"
+            is_military = any(keyword in full_text for keyword in military_keywords)
+            if is_military:
+                print(f"[Validator] Military excluded: '{vacancy.title}'")
+                user_rejected.append(vacancy)
+                continue
+
+            # === ПРОВЕРКА ИСКЛЮЧЕНИЙ ПОЛЬЗОВАТЕЛЯ ===
             if user_exclusions:
-                full_text = f"{(vacancy.title or '').lower()} {(vacancy.description or '').lower()}"
                 excluded = False
                 for excl in user_exclusions:
                     if excl in full_text:
