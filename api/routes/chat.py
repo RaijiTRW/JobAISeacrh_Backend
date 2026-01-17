@@ -139,15 +139,20 @@ async def send_message(request: ChatMessageRequest):
         total_found += db_result.total_found
 
         # 4.2: Валидация БД
-        db_validation = await validator.validate_batch(
-            db_result.vacancies,
-            preferences,
-            queries=queries,
-            required_city=preferences.city,
-        )
-        all_validated.extend(db_validation.validated)
-        all_rejected.extend(db_validation.rejected)
-        print(f"[Chat] БД: {len(db_validation.validated)} подходящих")
+        try:
+            db_validation = await validator.validate_batch(
+                db_result.vacancies,
+                preferences,
+                queries=queries,
+                required_city=preferences.city,
+            )
+            all_validated.extend(db_validation.validated)
+            all_rejected.extend(db_validation.rejected)
+            print(f"[Chat] БД: {len(db_validation.validated)} подходящих")
+        except Exception as e:
+            print(f"[Chat] Validator error for DB results, using all vacancies: {e}")
+            all_validated.extend(db_result.vacancies)
+            print(f"[Chat] БД: {len(db_result.vacancies)} (без валидации)")
 
         # 4.3: Поиск в сети (ВСЕГДА, независимо от результатов БД)
         online_filters = SearchFilters(
@@ -171,15 +176,20 @@ async def send_message(request: ChatMessageRequest):
         unique_online = [v for v in online_result.vacancies if v.id not in seen_ids]
         print(f"[Chat] Сеть: {len(unique_online)} уникальных после дедупликации")
 
-        online_validation = await validator.validate_batch(
-            unique_online,
-            preferences,
-            queries=queries,
-            required_city=preferences.city,
-        )
-        all_validated.extend(online_validation.validated)
-        all_rejected.extend(online_validation.rejected)
-        print(f"[Chat] Сеть: {len(online_validation.validated)} подходящих")
+        try:
+            online_validation = await validator.validate_batch(
+                unique_online,
+                preferences,
+                queries=queries,
+                required_city=preferences.city,
+            )
+            all_validated.extend(online_validation.validated)
+            all_rejected.extend(online_validation.rejected)
+            print(f"[Chat] Сеть: {len(online_validation.validated)} подходящих")
+        except Exception as e:
+            print(f"[Chat] Validator error for online results, using all vacancies: {e}")
+            all_validated.extend(unique_online)
+            print(f"[Chat] Сеть: {len(unique_online)} (без валидации)")
 
     # Режим: Только лента ИЛИ только сеть
     else:
@@ -200,15 +210,21 @@ async def send_message(request: ChatMessageRequest):
         total_found = search_result.total_found
         print(f"[Chat] Найдено {len(search_result.vacancies)} вакансий")
 
-        validation_result = await validator.validate_batch(
-            search_result.vacancies,
-            preferences,
-            queries=queries,
-            required_city=preferences.city,
-        )
-        all_validated = validation_result.validated
-        all_rejected = validation_result.rejected
-        print(f"[Chat] {len(all_validated)} подходящих")
+        try:
+            validation_result = await validator.validate_batch(
+                search_result.vacancies,
+                preferences,
+                queries=queries,
+                required_city=preferences.city,
+            )
+            all_validated = validation_result.validated
+            all_rejected = validation_result.rejected
+            print(f"[Chat] {len(all_validated)} подходящих")
+        except Exception as e:
+            print(f"[Chat] Validator error, using all vacancies: {e}")
+            all_validated = search_result.vacancies
+            all_rejected = []
+            print(f"[Chat] {len(all_validated)} (без валидации)")
 
     # === ШАГ 5: Формируем ответ ===
     response_message = f"Нашёл {len(all_validated)} подходящих вакансий из {total_found} найденных."
@@ -327,18 +343,26 @@ async def send_message_stream(request: ChatMessageRequest):
             # Добавляем ВСЕ ID из БД в seen_ids (чтобы не было дубликатов)
             seen_ids.update(v.id for v in db_result.vacancies)
 
-            db_validation = await validator.validate_batch(
-                db_result.vacancies,
-                preferences,
-                queries=queries,
-                required_city=preferences.city,
-            )
-            all_validated.extend(db_validation.validated)
-            all_rejected.extend(db_validation.rejected)
+            try:
+                db_validation = await validator.validate_batch(
+                    db_result.vacancies,
+                    preferences,
+                    queries=queries,
+                    required_city=preferences.city,
+                )
+                all_validated.extend(db_validation.validated)
+                all_rejected.extend(db_validation.rejected)
 
-            # Отправляем результаты БД сразу
-            if db_validation.validated:
-                db_vacancies_json = [v.model_dump(mode='json') for v in db_validation.validated]
+                # Отправляем результаты БД сразу
+                if db_validation.validated:
+                    db_vacancies_json = [v.model_dump(mode='json') for v in db_validation.validated]
+                    yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': db_vacancies_json, 'source': 'database'}, default=json_serializer)}\n\n"
+                    yield f"data: {json.dumps({'type': 'text', 'content': f'(найдено {len(all_validated)} из базы) '})}\n\n"
+            except Exception as e:
+                print(f"[Stream] Validator error for DB results, sending without validation: {e}")
+                # Fallback: отправляем все вакансии без валидации
+                all_validated.extend(db_result.vacancies)
+                db_vacancies_json = [v.model_dump(mode='json') for v in db_result.vacancies]
                 yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': db_vacancies_json, 'source': 'database'}, default=json_serializer)}\n\n"
                 yield f"data: {json.dumps({'type': 'text', 'content': f'(найдено {len(all_validated)} из базы) '})}\n\n"
 
@@ -363,20 +387,28 @@ async def send_message_stream(request: ChatMessageRequest):
             seen_ids.update(v.id for v in unique_fast)
 
             if unique_fast:
-                fast_validation = await validator.validate_batch(
-                    unique_fast,
-                    preferences,
-                    queries=queries,
-                    required_city=preferences.city,
-                )
-                all_validated.extend(fast_validation.validated)
-                all_rejected.extend(fast_validation.rejected)
+                try:
+                    fast_validation = await validator.validate_batch(
+                        unique_fast,
+                        preferences,
+                        queries=queries,
+                        required_city=preferences.city,
+                    )
+                    all_validated.extend(fast_validation.validated)
+                    all_rejected.extend(fast_validation.rejected)
 
-                # Отправляем HH + SuperJob сразу
-                if fast_validation.validated:
-                    fast_vacancies_json = [v.model_dump(mode='json') for v in fast_validation.validated]
+                    # Отправляем HH + SuperJob сразу
+                    if fast_validation.validated:
+                        fast_vacancies_json = [v.model_dump(mode='json') for v in fast_validation.validated]
+                        yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': fast_vacancies_json, 'source': 'hh_superjob'}, default=json_serializer)}\n\n"
+                        yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(fast_validation.validated)} из HH/SuperJob) '})}\n\n"
+                except Exception as e:
+                    print(f"[Stream] Validator error for fast results, sending without validation: {e}")
+                    # Fallback: отправляем все вакансии без валидации
+                    all_validated.extend(unique_fast)
+                    fast_vacancies_json = [v.model_dump(mode='json') for v in unique_fast]
                     yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': fast_vacancies_json, 'source': 'hh_superjob'}, default=json_serializer)}\n\n"
-                    yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(fast_validation.validated)} из HH/SuperJob) '})}\n\n"
+                    yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(unique_fast)} из HH/SuperJob) '})}\n\n"
 
             # 4.4: Медленный поиск Avito (в фоне, стримим по мере готовности)
             from tools.parsers.avito import AvitoParser
@@ -401,20 +433,28 @@ async def send_message_stream(request: ChatMessageRequest):
                 seen_ids.update(v.id for v in unique_avito)
 
                 if unique_avito:
-                    avito_validation = await validator.validate_batch(
-                        unique_avito,
-                        preferences,
-                        queries=queries,
-                        required_city=preferences.city,
-                    )
-                    all_validated.extend(avito_validation.validated)
-                    all_rejected.extend(avito_validation.rejected)
+                    try:
+                        avito_validation = await validator.validate_batch(
+                            unique_avito,
+                            preferences,
+                            queries=queries,
+                            required_city=preferences.city,
+                        )
+                        all_validated.extend(avito_validation.validated)
+                        all_rejected.extend(avito_validation.rejected)
 
-                    # Отправляем Avito результаты
-                    if avito_validation.validated:
-                        avito_vacancies_json = [v.model_dump(mode='json') for v in avito_validation.validated]
+                        # Отправляем Avito результаты
+                        if avito_validation.validated:
+                            avito_vacancies_json = [v.model_dump(mode='json') for v in avito_validation.validated]
+                            yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': avito_vacancies_json, 'source': 'avito'}, default=json_serializer)}\n\n"
+                            yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(avito_validation.validated)} из Avito) '})}\n\n"
+                    except Exception as e:
+                        print(f"[Stream] Validator error for Avito results, sending without validation: {e}")
+                        # Fallback: отправляем все вакансии без валидации
+                        all_validated.extend(unique_avito)
+                        avito_vacancies_json = [v.model_dump(mode='json') for v in unique_avito]
                         yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': avito_vacancies_json, 'source': 'avito'}, default=json_serializer)}\n\n"
-                        yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(avito_validation.validated)} из Avito) '})}\n\n"
+                        yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(unique_avito)} из Avito) '})}\n\n"
 
             except Exception as e:
                 print(f"[Chat] Avito error: {e}")

@@ -5,6 +5,7 @@ AI-фильтрация с confidence scoring и feedback loop
 
 import httpx
 import json
+import asyncio
 from dataclasses import dataclass, field
 from models.vacancy import Vacancy
 from models.chat import UserPreferences
@@ -252,60 +253,82 @@ class VacancyValidator:
 suggested_keywords — слова из ПОДХОДЯЩИХ вакансий, которые можно использовать для расширения поиска.
 Например если нашёл "оператор склада WB" — добавь "оператор склада", "WB"."""
 
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.settings.openrouter_base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.settings.openrouter_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.settings.validator_model_name,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 2000,
-                        "temperature": 0.1,
-                    },
-                    timeout=60.0,
-                )
+        # Retry логика: 3 попытки с увеличивающейся задержкой
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{self.settings.openrouter_base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": self.settings.validator_model_name,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": 2000,
+                            "temperature": 0.1,
+                        },
+                        timeout=60.0,
+                    )
 
-                if response.status_code != 200:
-                    print(f"[Validator] AI error {response.status_code}")
-                    raise Exception(f"AI validator error: {response.status_code}")
+                    if response.status_code != 200:
+                        error_text = response.text[:200] if response.text else "No error text"
+                        print(f"[Validator] AI error {response.status_code} (attempt {attempt+1}/{max_retries}): {error_text}")
 
-                data = response.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-                print(f"[Validator] AI response: {content[:300]}...")
+                        # Если это последняя попытка или не 5xx ошибка - fallback
+                        if attempt == max_retries - 1 or response.status_code < 500:
+                            print(f"[Validator] Fallback: approving all with low confidence")
+                            scores = {v.id: {"confidence": 0.5, "reason": "API error, auto-approved"} for v in vacancies}
+                            return scores, []
 
-                # Парсим JSON
-                try:
-                    # Ищем JSON в ответе
-                    start = content.find("{")
-                    end = content.rfind("}") + 1
-                    if start >= 0 and end > start:
-                        json_str = content[start:end]
-                        result = json.loads(json_str)
+                        # Иначе ждём и повторяем
+                        await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
+                        continue
 
-                        scores = {}
-                        for item in result.get("scores", []):
-                            scores[item["id"]] = {
-                                "confidence": float(item.get("confidence", 0.5)),
-                                "reason": item.get("reason", "")
-                            }
+                    data = response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                    print(f"[Validator] AI response: {content[:300]}...")
 
-                        keywords = result.get("suggested_keywords", [])
-                        return scores, keywords
+                    # Парсим JSON
+                    try:
+                        # Ищем JSON в ответе
+                        start = content.find("{")
+                        end = content.rfind("}") + 1
+                        if start >= 0 and end > start:
+                            json_str = content[start:end]
+                            result = json.loads(json_str)
 
-                except json.JSONDecodeError as e:
-                    print(f"[Validator] JSON parse error: {e}")
-                    # Fallback: одобряем всё
-                    scores = {v.id: {"confidence": 0.6, "reason": "fallback"} for v in vacancies}
+                            scores = {}
+                            for item in result.get("scores", []):
+                                scores[item["id"]] = {
+                                    "confidence": float(item.get("confidence", 0.5)),
+                                    "reason": item.get("reason", "")
+                                }
+
+                            keywords = result.get("suggested_keywords", [])
+                            return scores, keywords
+
+                    except json.JSONDecodeError as e:
+                        print(f"[Validator] JSON parse error: {e}")
+                        # Fallback: одобряем всё с низким confidence
+                        scores = {v.id: {"confidence": 0.5, "reason": "JSON parse error, auto-approved"} for v in vacancies}
+                        return scores, []
+
+            except Exception as e:
+                print(f"[Validator] Exception (attempt {attempt+1}/{max_retries}): {e}")
+
+                # Если это последняя попытка - возвращаем fallback
+                if attempt == max_retries - 1:
+                    print(f"[Validator] All retries failed, using fallback")
+                    scores = {v.id: {"confidence": 0.5, "reason": "Validator error, auto-approved"} for v in vacancies}
                     return scores, []
 
-        except Exception as e:
-            print(f"[Validator] Error: {e}")
-            raise
+                # Иначе ждём и повторяем
+                await asyncio.sleep(2 ** attempt)
 
+        # Не должны сюда попасть, но на всякий случай
         return {}, []
 
 
