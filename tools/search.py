@@ -264,6 +264,12 @@ class VacancySearchTool:
 
     def _process_results(self, vacancies: list[Vacancy], filters: SearchFilters) -> list[Vacancy]:
         """Дедупликация, балансировка и лимиты"""
+        # Исключаем вакансии по ID (для функции "Еще")
+        if filters.exclude_vacancy_ids:
+            exclude_set = set(filters.exclude_vacancy_ids)
+            vacancies = [v for v in vacancies if v.id not in exclude_set]
+            print(f"[Search] After excluding {len(filters.exclude_vacancy_ids)} IDs: {len(vacancies)}")
+
         # Дедупликация по ID и ключу
         seen_ids = set()
         seen_keys = set()

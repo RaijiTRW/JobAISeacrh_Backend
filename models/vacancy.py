@@ -39,6 +39,7 @@ class SearchFilters(BaseModel):
     experience: Optional[str] = None  # no_experience, 1-3, 3-6, 6+
     employment_type: Optional[str] = None  # full, part, remote
     exclude_keywords: list[str] = []
+    exclude_vacancy_ids: list[str] = []  # ID вакансий для исключения
     # Режим поиска
     search_in_feed: bool = True   # Поиск в ленте (БД)
     search_online: bool = True    # Поиск в сети (live)

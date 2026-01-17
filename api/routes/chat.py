@@ -39,6 +39,7 @@ class ChatMessageRequest(BaseModel):
     user_id: str
     search_in_feed: bool = True  # Поиск в ленте (БД)
     search_online: bool = True   # Поиск в сети (live)
+    exclude_vacancy_ids: list[str] = []  # ID вакансий для исключения
 
 
 class ChatMessageResponse(BaseModel):
@@ -82,6 +83,7 @@ async def send_message(request: ChatMessageRequest):
         request.message,
         session["preferences"],
         user_data,
+        session["history"],  # Передаем историю для контекста
     )
     session["preferences"] = preferences
 
@@ -128,6 +130,7 @@ async def send_message(request: ChatMessageRequest):
             experience=preferences.experience,
             employment_type=preferences.employment_type,
             exclude_keywords=preferences.exclude_keywords,
+            exclude_vacancy_ids=request.exclude_vacancy_ids,
             search_in_feed=True,
             search_online=False,
         )
@@ -155,6 +158,7 @@ async def send_message(request: ChatMessageRequest):
             experience=preferences.experience,
             employment_type=preferences.employment_type,
             exclude_keywords=preferences.exclude_keywords,
+            exclude_vacancy_ids=request.exclude_vacancy_ids,
             search_in_feed=False,
             search_online=True,
         )
@@ -187,6 +191,7 @@ async def send_message(request: ChatMessageRequest):
             experience=preferences.experience,
             employment_type=preferences.employment_type,
             exclude_keywords=preferences.exclude_keywords,
+            exclude_vacancy_ids=request.exclude_vacancy_ids,
             search_in_feed=request.search_in_feed,
             search_online=request.search_online,
         )

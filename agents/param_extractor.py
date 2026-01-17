@@ -23,15 +23,22 @@ class ParamExtractor:
         message: str,
         current_prefs: UserPreferences,
         user_data: Optional[UserData] = None,
+        history: Optional[list[dict]] = None,
     ) -> tuple[UserPreferences, bool, Optional[str]]:
         """
         Извлекает параметры из сообщения
+
+        Args:
+            message: Текущее сообщение пользователя
+            current_prefs: Текущие предпочтения пользователя
+            user_data: Данные профиля пользователя
+            history: История сообщений чата для контекста
 
         Returns:
             (preferences, needs_clarification, clarification_message)
         """
         # Извлекаем новые параметры
-        new_prefs = await self._extract_params(message, current_prefs)
+        new_prefs = await self._extract_params(message, current_prefs, history or [])
 
         # Дополняем из профиля если нужно
         new_prefs = self._merge_with_profile(new_prefs, user_data)
@@ -42,9 +49,9 @@ class ParamExtractor:
         return new_prefs, needs_clarification, clarification_msg
 
     async def _extract_params(
-        self, message: str, current: UserPreferences
+        self, message: str, current: UserPreferences, history: list[dict]
     ) -> UserPreferences:
-        """Извлечение параметров через LLM"""
+        """Извлечение параметров через LLM с учетом истории"""
 
         current_info = []
         if current.query:
@@ -62,13 +69,29 @@ class ParamExtractor:
 
         current_str = "\n".join(current_info) if current_info else "Пока ничего не известно"
 
+        # Форматируем историю для контекста (последние 5 сообщений)
+        history_context = ""
+        if history:
+            recent_history = history[-5:]  # Берем последние 5 сообщений
+            history_lines = []
+            for msg in recent_history:
+                role = "Пользователь" if msg.get("role") == "user" else "AI"
+                content = msg.get("content", "")
+                history_lines.append(f"{role}: {content}")
+            history_context = "\n".join(history_lines)
+
         prompt = f"""Извлеки информацию о поиске работы из сообщения.
 НЕ повторяй уже известное, только НОВОЕ из сообщения.
+
+{"История чата (для контекста):" if history_context else ""}
+{history_context}
 
 Уже известно:
 {current_str}
 
 Новое сообщение: {message}
+
+ВАЖНО: Если пользователь пишет "найди еще", "посмотри еще", "покажи еще" и т.п., это означает что он хочет продолжить поиск по ТЕМ ЖЕ параметрам. НЕ меняй параметры, оставь их как есть.
 
 Верни ТОЛЬКО JSON без пояснений:
 {{
