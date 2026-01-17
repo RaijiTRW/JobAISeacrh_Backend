@@ -301,6 +301,10 @@ async def send_message_stream(request: ChatMessageRequest):
         total_found = 0
         seen_ids = set()
 
+        # Отправляем начальное сообщение
+        yield f"data: {json.dumps({'type': 'text', 'content': 'Ищу вакансии '})}\n\n"
+        await asyncio.sleep(0.05)
+
         # Режим: Лента + Сеть (поэтапная валидация с progressive loading)
         if request.search_in_feed and request.search_online:
             # 4.1: Поиск в БД
@@ -336,7 +340,7 @@ async def send_message_stream(request: ChatMessageRequest):
             if db_validation.validated:
                 db_vacancies_json = [v.model_dump(mode='json') for v in db_validation.validated]
                 yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': db_vacancies_json, 'source': 'database'}, default=json_serializer)}\n\n"
-                yield f"data: {json.dumps({'type': 'progress', 'message': f'Найдено {len(db_validation.validated)} в базе, ищу в сети...'})}\n\n"
+                yield f"data: {json.dumps({'type': 'text', 'content': f'(найдено {len(all_validated)} из базы) '})}\n\n"
 
             # 4.3: Быстрый поиск (HH + SuperJob) БЕЗ Avito
             fast_result = await vacancy_search._search_live_fast(
@@ -372,7 +376,7 @@ async def send_message_stream(request: ChatMessageRequest):
                 if fast_validation.validated:
                     fast_vacancies_json = [v.model_dump(mode='json') for v in fast_validation.validated]
                     yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': fast_vacancies_json, 'source': 'hh_superjob'}, default=json_serializer)}\n\n"
-                    yield f"data: {json.dumps({'type': 'progress', 'message': f'Найдено {len(all_validated)} вакансий, загружаю с Avito...'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(fast_validation.validated)} из HH/SuperJob) '})}\n\n"
 
             # 4.4: Медленный поиск Avito (в фоне, стримим по мере готовности)
             from tools.parsers.avito import AvitoParser
@@ -410,6 +414,7 @@ async def send_message_stream(request: ChatMessageRequest):
                     if avito_validation.validated:
                         avito_vacancies_json = [v.model_dump(mode='json') for v in avito_validation.validated]
                         yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': avito_vacancies_json, 'source': 'avito'}, default=json_serializer)}\n\n"
+                        yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(avito_validation.validated)} из Avito) '})}\n\n"
 
             except Exception as e:
                 print(f"[Chat] Avito error: {e}")
@@ -442,23 +447,34 @@ async def send_message_stream(request: ChatMessageRequest):
             all_validated = validation_result.validated
             all_rejected = validation_result.rejected
 
-        # === ШАГ 5: Стримим ответ ===
-        response_message = f"Нашёл {len(all_validated)} подходящих вакансий из {total_found} найденных."
+        # === ШАГ 5: Итоговое сообщение ===
+        response_message = f"\n\nИтого: {len(all_validated)} подходящих вакансий из {total_found} найденных."
 
-        words = response_message.split()
-        for word in words:
-            yield f"data: {json.dumps({'type': 'text', 'content': word + ' '})}\n\n"
-            await asyncio.sleep(0.03)
+        # Для progressive loading режима - просто добавляем итоговое сообщение
+        if request.search_in_feed and request.search_online:
+            yield f"data: {json.dumps({'type': 'text', 'content': response_message})}\n\n"
 
-        # Отправляем вакансии
-        vacancies_json = [v.model_dump(mode='json') for v in all_validated]
-        if vacancies_json:
-            yield f"data: {json.dumps({'type': 'vacancies', 'content': vacancies_json}, default=json_serializer)}\n\n"
+            # Отправляем отсеянные
+            rejected_json = [v.model_dump(mode='json') for v in all_rejected]
+            if rejected_json:
+                yield f"data: {json.dumps({'type': 'rejected_vacancies', 'content': rejected_json}, default=json_serializer)}\n\n"
 
-        # Отправляем отсеянные
-        rejected_json = [v.model_dump(mode='json') for v in all_rejected]
-        if rejected_json:
-            yield f"data: {json.dumps({'type': 'rejected_vacancies', 'content': rejected_json}, default=json_serializer)}\n\n"
+        # Для обычного режима - стримим ответ и отправляем все вакансии
+        else:
+            words = response_message.split()
+            for word in words:
+                yield f"data: {json.dumps({'type': 'text', 'content': word + ' '})}\n\n"
+                await asyncio.sleep(0.03)
+
+            # Отправляем вакансии
+            vacancies_json = [v.model_dump(mode='json') for v in all_validated]
+            if vacancies_json:
+                yield f"data: {json.dumps({'type': 'vacancies', 'content': vacancies_json}, default=json_serializer)}\n\n"
+
+            # Отправляем отсеянные
+            rejected_json = [v.model_dump(mode='json') for v in all_rejected]
+            if rejected_json:
+                yield f"data: {json.dumps({'type': 'rejected_vacancies', 'content': rejected_json}, default=json_serializer)}\n\n"
 
         # Завершение
         yield f"data: {json.dumps({'type': 'done', 'chat_id': session_key})}\n\n"
