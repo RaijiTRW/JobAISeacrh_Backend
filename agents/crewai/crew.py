@@ -1,49 +1,173 @@
 """
-JobSearchCrew - главный модуль CrewAI для поиска работы.
+JobSearchCrew - мультиагентная система поиска работы.
+Реализация без зависимости от crewai/langchain - прямые вызовы OpenRouter API.
 """
 import json
-import asyncio
+import re
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from crewai import Crew, Process
+from .llm_config import get_main_llm, get_fast_llm
+from .session_manager import Session, SessionManager, session_manager
 
-from .agents import (
-    create_career_advisor,
-    create_requirements_analyst,
-    create_search_strategist,
-    create_vacancy_validator,
-    create_response_composer,
-)
-from .tasks import (
-    create_analyze_request_task,
-    create_strategy_task,
-    create_execute_search_task,
-    create_validate_results_task,
-    create_compose_response_task,
-)
-from .tools.search_tools import vacancy_search_tool, database_search_tool
-from .tools.profile_tools import user_profile_tool
-from .session_manager import Session, SessionManager
+# Импорты для поиска
+from tools.search import vacancy_search
+from models.vacancy import SearchFilters
+from services.user_profile import user_profile_service
 
 
 @dataclass
 class CrewResult:
     """Результат работы Crew."""
     response_text: str
-    vacancies: list[dict]
-    request_type: str
+    vacancies: list = field(default_factory=list)
+    request_type: str = "CHAT"
     show_vacancies: bool = True
-    suggested_actions: list[str] = None
+    suggested_actions: list = field(default_factory=list)
+
+
+# === СИСТЕМНЫЕ ПРОМПТЫ АГЕНТОВ ===
+
+ANALYST_SYSTEM_PROMPT = """Ты - аналитик запросов для поиска работы. Твоя задача - понять что хочет пользователь и извлечь параметры поиска.
+
+ПРАВИЛА:
+1. Анализируй сообщение пользователя и извлеки параметры
+2. Если запрос размытый (нет профессии или города) - задай ОДИН уточняющий вопрос
+3. Учитывай контекст предыдущих сообщений
+4. Определи тип запроса: SEARCH, CLARIFICATION, CHAT, PROFILE
+
+ПАРАМЕТРЫ ДЛЯ ИЗВЛЕЧЕНИЯ:
+- professions: список профессий (может быть несколько!)
+- city: город
+- salary_from: минимальная зарплата (число)
+- salary_to: максимальная зарплата (число)
+- experience: опыт (no_experience, 1-3, 3-6, 6+)
+- employment_type: тип занятости (full, part, remote)
+- exclude_keywords: что исключить
+
+КОГДА ЗАДАВАТЬ ВОПРОС (CLARIFICATION):
+- Нет профессии И нет контекста → спроси про профессию
+- Есть профессия, но очень общая ("работа", "нормальная работа") → уточни сферу
+- НЕ спрашивай про зарплату если уже указана
+- НЕ спрашивай про город если уже указан
+- Задавай ОДИН вопрос, не несколько сразу
+
+ПРИМЕРЫ:
+"Найди работу в Москве от 80к" → CLARIFICATION (нет профессии)
+"Продавец в Краснодаре" → SEARCH (всё ясно)
+"Ищу работу продавцом или администратором в Новороссийске от 40к" → SEARCH (несколько профессий)
+"Привет, как дела?" → CHAT
+"Что у меня в резюме?" → PROFILE
+
+ФОРМАТ ОТВЕТА (строго JSON):
+{
+    "request_type": "SEARCH" | "CLARIFICATION" | "CHAT" | "PROFILE",
+    "parameters": {
+        "professions": ["профессия1", "профессия2"],
+        "city": "город" | null,
+        "salary_from": число | null,
+        "salary_to": число | null,
+        "experience": "строка" | null,
+        "employment_type": "строка" | null,
+        "exclude_keywords": []
+    },
+    "clarification_question": "вопрос если тип CLARIFICATION" | null,
+    "search_ready": true | false
+}"""
+
+STRATEGIST_SYSTEM_PROMPT = """Ты - стратег поиска вакансий. Генерируешь оптимальные поисковые запросы на основе параметров.
+
+ПРАВИЛА:
+1. Для каждой профессии генерируй 3-5 вариантов запроса (синонимы, вариации)
+2. Учитывай разговорные названия профессий
+3. Не дублируй запросы
+
+СЛОВАРЬ СИНОНИМОВ:
+- Продавец → продавец, продавец-консультант, продавец-кассир, менеджер торгового зала
+- Администратор → администратор, офис-менеджер, управляющий, администратор зала
+- Водитель → водитель, водитель категории B, водитель-курьер, водитель-экспедитор
+- Программист → программист, разработчик, developer, software engineer
+- Бухгалтер → бухгалтер, главный бухгалтер, бухгалтер на участок
+- Менеджер → менеджер по продажам, sales manager, менеджер по работе с клиентами
+- Курьер → курьер, доставщик, курьер пеший, курьер на авто
+- ПВЗ → сотрудник ПВЗ, оператор пункта выдачи, менеджер ПВЗ, кладовщик ПВЗ
+
+ФОРМАТ ОТВЕТА (JSON):
+{
+    "queries": ["запрос1", "запрос2", ...],
+    "search_config": {
+        "city": "город",
+        "salary_from": число | null,
+        "salary_to": число | null
+    }
+}"""
+
+VALIDATOR_SYSTEM_PROMPT = """Ты - валидатор вакансий. Проверяешь релевантность вакансий запросу пользователя.
+
+ПРАВИЛА ПРОВЕРКИ:
+1. Город должен совпадать (если указан)
+2. Профессия должна быть релевантна
+3. Зарплата должна быть >= указанной (если указана)
+4. Отсеивай подозрительные (военные вербовки, MLM, мошенничество)
+
+РЕЙТИНГ:
+- A: идеально подходит (город + профессия + зарплата совпадают)
+- B: хорошо подходит (2 из 3 параметров совпадают)
+- C: может подойти (1 параметр совпадает или близко)
+- REJECT: не подходит
+
+ФОРМАТ ОТВЕТА (JSON):
+{
+    "validated": [
+        {"id": "id_вакансии", "rating": "A"|"B"|"C", "reason": "причина"}
+    ],
+    "rejected": [
+        {"id": "id_вакансии", "reason": "причина отклонения"}
+    ],
+    "stats": {
+        "total": число,
+        "accepted": число,
+        "rating_a": число,
+        "rating_b": число,
+        "rating_c": число
+    }
+}"""
+
+COMPOSER_SYSTEM_PROMPT = """Ты - составитель ответов для AI-помощника по поиску работы. Формируешь дружелюбные, краткие ответы.
+
+ПРАВИЛА:
+1. КРАТКОСТЬ: 1-3 предложения максимум
+2. КОНКРЕТИКА: "Нашёл 23 вакансии" а не "нашёл несколько"
+3. ТОН: дружелюбный, но профессиональный
+4. БЕЗ канцеляризмов и официоза
+5. НЕ перечисляй вакансии в тексте - они показываются отдельно карточками
+
+ПРИ УТОЧНЕНИИ:
+- Подтверди что понял
+- Задай ОДИН вопрос
+- Пример: "Понял, ищем в Москве от 80 тысяч. А какая профессия интересует?"
+
+ПРИ ПОИСКЕ:
+- Краткое резюме: "Нашёл X вакансий [профессия] в [город]."
+- Если мало (<5): предложи расширить, НЕ извиняйся
+
+ПРИ ЧАТЕ:
+- Ответь дружелюбно
+- Направь к поиску если уместно
+
+ЗАПРЕЩЕНО:
+- "Здравствуйте! Я рад помочь..."
+- Длинные вступления
+- Извинения за малое количество
+- Технические детали
+
+Отвечай ТОЛЬКО текст ответа, без JSON."""
 
 
 class JobSearchCrew:
     """
-    Главный класс для управления CrewAI агентами поиска работы.
-
-    Использование:
-        crew = JobSearchCrew(user_id, user_data, session)
-        result = await crew.process_message("Найди работу в Москве")
+    Мультиагентная система для поиска работы.
+    Использует прямые вызовы OpenRouter API.
     """
 
     def __init__(
@@ -55,19 +179,8 @@ class JobSearchCrew:
         self.user_id = user_id
         self.user_data = user_data or {}
         self.session = session
-
-        # Настраиваем tools с user_id
-        user_profile_tool.set_user_id(user_id)
-
-        # Создаём агентов
-        self.career_advisor = create_career_advisor()
-        self.requirements_analyst = create_requirements_analyst()
-        self.search_strategist = create_search_strategist()
-        self.vacancy_validator = create_vacancy_validator()
-        self.response_composer = create_response_composer()
-
-        # Добавляем tools агенту-стратегу
-        self.search_strategist.tools = [vacancy_search_tool, database_search_tool]
+        self.main_llm = get_main_llm()
+        self.fast_llm = get_fast_llm()
 
     async def process_message(
         self,
@@ -75,116 +188,95 @@ class JobSearchCrew:
         conversation_history: list[dict] = None,
         use_live_search: bool = True,
     ) -> CrewResult:
-        """
-        Обработать сообщение пользователя.
-
-        Args:
-            message: Сообщение пользователя
-            conversation_history: История диалога
-            use_live_search: Использовать ли live поиск (hh, avito)
-
-        Returns:
-            CrewResult с ответом и вакансиями
-        """
+        """Обработать сообщение пользователя."""
         history = conversation_history or []
         context_summary = ""
-
         if self.session:
             context_summary = self.session.get_context_summary()
 
-        # Извлекаем имя пользователя
         user_name = self.user_data.get("name") or self.user_data.get("first_name")
 
         # Шаг 1: Анализ запроса
-        print(f"[CrewAI] Step 1: Analyzing request...")
-        analysis_result = await self._analyze_request(message, history, context_summary)
+        print(f"[AI] Step 1: Analyzing request...")
+        analysis = await self._analyze_request(message, history, context_summary)
 
-        request_type = analysis_result.get("request_type", "CHAT")
-        print(f"[CrewAI] Request type: {request_type}")
+        request_type = analysis.get("request_type", "CHAT")
+        print(f"[AI] Request type: {request_type}")
 
-        # Шаг 2: Обработка в зависимости от типа
+        # Шаг 2: Обработка по типу
         if request_type == "CLARIFICATION":
-            # Нужны уточнения - формируем вопрос
-            response = await self._compose_response(
+            question = analysis.get("clarification_question", "")
+            response_text = await self._compose_response(
                 request_type="CLARIFICATION",
-                analysis_result=analysis_result,
+                context={
+                    "parameters": analysis.get("parameters", {}),
+                    "question": question,
+                },
                 user_name=user_name,
             )
             return CrewResult(
-                response_text=response.get("response_text", ""),
+                response_text=response_text,
                 vacancies=[],
                 request_type=request_type,
                 show_vacancies=False,
             )
 
         elif request_type == "SEARCH":
-            # Полный поиск
-            print(f"[CrewAI] Step 2: Creating search strategy...")
-            strategy = await self._create_strategy(analysis_result)
+            params = analysis.get("parameters", {})
 
-            print(f"[CrewAI] Step 3: Executing search...")
-            search_results = await self._execute_search(strategy, use_live_search)
+            # Шаг 2: Генерация поисковых запросов
+            print(f"[AI] Step 2: Creating search strategy...")
+            strategy = await self._create_strategy(params)
 
-            vacancies = search_results.get("vacancies", [])
-            print(f"[CrewAI] Found {len(vacancies)} vacancies")
+            # Шаг 3: Выполнение поиска
+            print(f"[AI] Step 3: Executing search...")
+            vacancies = await self._execute_search(strategy, use_live_search)
+            print(f"[AI] Found {len(vacancies)} vacancies")
 
-            # Шаг 4: Валидация (если есть результаты)
-            validation_results = {"stats": {"total": 0, "accepted": 0}}
-            validated_vacancies = []
-
-            if vacancies:
-                print(f"[CrewAI] Step 4: Validating results...")
-                validation_results = await self._validate_results(vacancies, analysis_result)
-
-                # Фильтруем вакансии по результатам валидации
-                validated_ids = {v["id"] for v in validation_results.get("validated", [])}
-                validated_vacancies = [v for v in vacancies if v.get("id") in validated_ids]
-
-                # Сортируем по рейтингу
-                rating_order = {"A": 0, "B": 1, "C": 2}
-                validated_map = {v["id"]: v.get("rating", "C") for v in validation_results.get("validated", [])}
-
-                validated_vacancies.sort(
-                    key=lambda x: rating_order.get(validated_map.get(x.get("id"), "C"), 2)
-                )
+            # Шаг 4: Валидация
+            validated_vacancies = vacancies
+            if vacancies and len(vacancies) > 0:
+                print(f"[AI] Step 4: Validating results...")
+                validated_vacancies = await self._validate_results(vacancies, params)
+                print(f"[AI] Validated: {len(validated_vacancies)} vacancies")
 
             # Шаг 5: Формирование ответа
-            print(f"[CrewAI] Step 5: Composing response...")
-            response = await self._compose_response(
+            print(f"[AI] Step 5: Composing response...")
+            response_text = await self._compose_response(
                 request_type="SEARCH",
-                analysis_result=analysis_result,
-                search_results=search_results,
-                validation_results=validation_results,
+                context={
+                    "parameters": params,
+                    "total_found": len(vacancies),
+                    "validated_count": len(validated_vacancies),
+                },
                 user_name=user_name,
             )
 
-            # Обновляем сессию если есть
+            # Обновляем сессию
             if self.session:
-                params = analysis_result.get("parameters", {})
                 if params.get("city"):
                     self.session.update_preferences(city=params["city"])
                 if params.get("professions"):
-                    self.session.update_preferences(professions=params["professions"])
+                    self.session.update_preferences(query=", ".join(params["professions"]))
                 if params.get("salary_from"):
                     self.session.update_preferences(salary_from=params["salary_from"])
 
             return CrewResult(
-                response_text=response.get("response_text", ""),
+                response_text=response_text,
                 vacancies=validated_vacancies,
                 request_type=request_type,
-                show_vacancies=response.get("show_vacancies", True),
-                suggested_actions=response.get("suggested_actions"),
+                show_vacancies=True,
             )
 
         else:
-            # CHAT или PROFILE - просто отвечаем
-            response = await self._compose_response(
+            # CHAT или PROFILE
+            response_text = await self._compose_response(
                 request_type=request_type,
-                analysis_result=analysis_result,
+                context={"message": message},
                 user_name=user_name,
             )
             return CrewResult(
-                response_text=response.get("response_text", ""),
+                response_text=response_text,
                 vacancies=[],
                 request_type=request_type,
                 show_vacancies=False,
@@ -196,177 +288,283 @@ class JobSearchCrew:
         history: list[dict],
         context_summary: str,
     ) -> dict:
-        """Анализ запроса пользователя."""
-        task = create_analyze_request_task(
-            agent=self.requirements_analyst,
-            user_message=message,
-            user_profile=self.user_data,
-            conversation_history=history,
-            context_summary=context_summary,
-        )
+        """Анализ запроса через LLM."""
+        # Формируем контекст
+        context_parts = []
+        if context_summary:
+            context_parts.append(f"Контекст сессии: {context_summary}")
+        if self.user_data:
+            if self.user_data.get("city"):
+                context_parts.append(f"Город пользователя: {self.user_data['city']}")
+            if self.user_data.get("desired_position"):
+                context_parts.append(f"Желаемая должность: {self.user_data['desired_position']}")
 
-        crew = Crew(
-            agents=[self.requirements_analyst],
-            tasks=[task],
-            process=Process.sequential,
-            verbose=False,
-        )
+        # Формируем историю для контекста
+        history_text = ""
+        if history:
+            recent = history[-6:]  # Последние 6 сообщений
+            history_lines = []
+            for msg in recent:
+                role = "Пользователь" if msg["role"] == "user" else "AI"
+                history_lines.append(f"{role}: {msg['content'][:200]}")
+            history_text = "\n".join(history_lines)
 
-        result = await asyncio.to_thread(crew.kickoff)
-        return self._parse_json_result(result.raw if hasattr(result, 'raw') else str(result))
+        user_prompt = f"""Сообщение пользователя: "{message}"
 
-    async def _create_strategy(self, analysis_result: dict) -> dict:
-        """Создание стратегии поиска."""
-        task = create_strategy_task(
-            agent=self.search_strategist,
-            analysis_result=analysis_result,
-        )
+{"Предыдущий диалог:" + chr(10) + history_text if history_text else "Новый диалог."}
 
-        crew = Crew(
-            agents=[self.search_strategist],
-            tasks=[task],
-            process=Process.sequential,
-            verbose=False,
-        )
+{chr(10).join(context_parts) if context_parts else ""}
 
-        result = await asyncio.to_thread(crew.kickoff)
-        return self._parse_json_result(result.raw if hasattr(result, 'raw') else str(result))
+Проанализируй запрос и верни JSON."""
 
-    async def _execute_search(self, strategy: dict, use_live_search: bool) -> dict:
+        try:
+            result = await self.main_llm.chat(
+                system_prompt=ANALYST_SYSTEM_PROMPT,
+                user_message=user_prompt,
+                json_mode=True,
+            )
+            return self._parse_json(result)
+        except Exception as e:
+            print(f"[AI] Analyst error: {e}")
+            # Fallback - пробуем простой анализ
+            return {"request_type": "CHAT", "parameters": {}}
+
+    async def _create_strategy(self, params: dict) -> dict:
+        """Генерация поисковых запросов."""
+        professions = params.get("professions", [])
+        city = params.get("city", "")
+        salary = params.get("salary_from")
+
+        user_prompt = f"""Параметры поиска:
+- Профессии: {', '.join(professions) if professions else 'не указана'}
+- Город: {city or 'не указан'}
+- Зарплата от: {salary or 'не указана'}
+
+Сгенерируй поисковые запросы (JSON)."""
+
+        try:
+            result = await self.fast_llm.chat(
+                system_prompt=STRATEGIST_SYSTEM_PROMPT,
+                user_message=user_prompt,
+                json_mode=True,
+            )
+            return self._parse_json(result)
+        except Exception as e:
+            print(f"[AI] Strategy error: {e}")
+            # Fallback - используем профессии напрямую
+            return {
+                "queries": professions if professions else ["работа"],
+                "search_config": {
+                    "city": city,
+                    "salary_from": salary,
+                }
+            }
+
+    async def _execute_search(self, strategy: dict, use_live_search: bool) -> list:
         """Выполнение поиска вакансий."""
-        # Для поиска используем tools напрямую для лучшего контроля
-        search_queries = strategy.get("search_queries", [])
+        queries = strategy.get("queries", [])
         config = strategy.get("search_config", {})
 
-        all_queries = []
-        for sq in search_queries:
-            all_queries.extend(sq.get("queries", []))
-
-        if not all_queries:
-            return {"vacancies": [], "stats": {"total_found": 0}}
+        if not queries:
+            return []
 
         city = config.get("city", "")
         salary_from = config.get("salary_from")
 
-        # Сначала ищем в базе
+        # Поиск в БД
         try:
-            db_result = database_search_tool._run(
-                queries=all_queries[:10],  # Ограничиваем количество
+            db_filters = SearchFilters(
+                queries=queries[:10],
                 city=city,
                 salary_from=salary_from,
+                search_in_feed=True,
+                search_online=False,
             )
-            db_vacancies = db_result if isinstance(db_result, list) else []
+            db_result = await vacancy_search.search(db_filters)
+            all_vacancies = list(db_result.vacancies)
+            print(f"[AI] DB: {len(all_vacancies)} vacancies")
         except Exception as e:
-            print(f"[CrewAI] Database search error: {e}")
-            db_vacancies = []
+            print(f"[AI] DB search error: {e}")
+            all_vacancies = []
 
         # Live поиск если нужен
-        live_vacancies = []
-        if use_live_search and len(db_vacancies) < 10:
+        if use_live_search:
             try:
-                live_result = vacancy_search_tool._run(
-                    queries=all_queries[:5],
+                live_filters = SearchFilters(
+                    queries=queries[:5],
                     city=city,
                     salary_from=salary_from,
-                    include_live=True,
+                    search_in_feed=False,
+                    search_online=True,
                 )
-                live_vacancies = live_result if isinstance(live_result, list) else []
+                live_result = await vacancy_search.search(live_filters)
+
+                # Дедупликация
+                seen_ids = {v.id for v in all_vacancies}
+                for v in live_result.vacancies:
+                    if v.id not in seen_ids:
+                        all_vacancies.append(v)
+                        seen_ids.add(v.id)
+
+                print(f"[AI] Live: +{len(live_result.vacancies)} vacancies")
             except Exception as e:
-                print(f"[CrewAI] Live search error: {e}")
+                print(f"[AI] Live search error: {e}")
 
-        # Объединяем и удаляем дубликаты
-        all_vacancies = db_vacancies + live_vacancies
-        seen_ids = set()
-        unique_vacancies = []
-        for v in all_vacancies:
-            vid = v.get("id") or v.get("url", "")
-            if vid not in seen_ids:
-                seen_ids.add(vid)
-                unique_vacancies.append(v)
+        return all_vacancies
 
-        return {
-            "vacancies": unique_vacancies,
-            "stats": {
-                "total_found": len(unique_vacancies),
-                "from_database": len(db_vacancies),
-                "from_live": len(live_vacancies),
-            }
-        }
+    async def _validate_results(self, vacancies: list, params: dict) -> list:
+        """Валидация вакансий через LLM."""
+        if not vacancies:
+            return []
 
-    async def _validate_results(
-        self,
-        vacancies: list[dict],
-        analysis_result: dict,
-    ) -> dict:
-        """Валидация вакансий."""
-        task = create_validate_results_task(
-            agent=self.vacancy_validator,
-            vacancies=vacancies,
-            original_request=analysis_result,
-        )
+        # Для большого числа вакансий - берём первые 50
+        to_validate = vacancies[:50]
 
-        crew = Crew(
-            agents=[self.vacancy_validator],
-            tasks=[task],
-            process=Process.sequential,
-            verbose=False,
-        )
+        # Формируем краткое описание вакансий
+        vacancy_summaries = []
+        for v in to_validate:
+            title = getattr(v, 'title', '') or ''
+            company = getattr(v, 'company', '') or ''
+            city = getattr(v, 'city', '') or ''
+            salary = getattr(v, 'salary', '') or ''
+            vid = getattr(v, 'id', '') or ''
+            vacancy_summaries.append(
+                f"ID:{vid} | {title} | {company} | {city} | {salary}"
+            )
 
-        result = await asyncio.to_thread(crew.kickoff)
-        return self._parse_json_result(result.raw if hasattr(result, 'raw') else str(result))
+        vacancies_text = "\n".join(vacancy_summaries)
+
+        professions = params.get("professions", [])
+        city = params.get("city", "")
+        salary_from = params.get("salary_from")
+
+        user_prompt = f"""Параметры поиска:
+- Профессии: {', '.join(professions)}
+- Город: {city or 'любой'}
+- Зарплата от: {salary_from or 'любая'}
+
+Вакансии для проверки:
+{vacancies_text}
+
+Проверь каждую вакансию и верни JSON."""
+
+        try:
+            result = await self.fast_llm.chat(
+                system_prompt=VALIDATOR_SYSTEM_PROMPT,
+                user_message=user_prompt,
+                json_mode=True,
+                max_tokens=4000,
+            )
+            validation = self._parse_json(result)
+
+            # Извлекаем ID прошедших валидацию
+            validated_ids = set()
+            for item in validation.get("validated", []):
+                validated_ids.add(str(item.get("id", "")))
+
+            # Если валидатор ничего не вернул - возвращаем все
+            if not validated_ids:
+                return vacancies
+
+            # Фильтруем
+            validated = [v for v in vacancies if str(getattr(v, 'id', '')) in validated_ids]
+
+            # Если после фильтрации осталось слишком мало - возвращаем все
+            if len(validated) < 3 and len(vacancies) > 5:
+                return vacancies
+
+            return validated
+
+        except Exception as e:
+            print(f"[AI] Validation error: {e}")
+            # При ошибке - возвращаем все вакансии
+            return vacancies
 
     async def _compose_response(
         self,
         request_type: str,
-        analysis_result: dict = None,
-        search_results: dict = None,
-        validation_results: dict = None,
+        context: dict,
         user_name: str = None,
-    ) -> dict:
+    ) -> str:
         """Формирование ответа пользователю."""
-        task = create_compose_response_task(
-            agent=self.response_composer,
-            request_type=request_type,
-            analysis_result=analysis_result,
-            search_results=search_results,
-            validation_results=validation_results,
-            user_name=user_name,
-        )
+        # Формируем промпт в зависимости от типа
+        parts = []
 
-        crew = Crew(
-            agents=[self.response_composer],
-            tasks=[task],
-            process=Process.sequential,
-            verbose=False,
-        )
+        if user_name:
+            parts.append(f"Имя пользователя: {user_name}")
 
-        result = await asyncio.to_thread(crew.kickoff)
-        return self._parse_json_result(result.raw if hasattr(result, 'raw') else str(result))
+        if request_type == "CLARIFICATION":
+            params = context.get("parameters", {})
+            question = context.get("question", "")
+            parts.append(f"ТИП: Уточняющий вопрос")
+            parts.append(f"Известно: город={params.get('city', '?')}, профессия={params.get('professions', '?')}, зарплата={params.get('salary_from', '?')}")
+            parts.append(f"Нужно спросить: {question}")
 
-    def _parse_json_result(self, result: str) -> dict:
-        """Парсинг JSON результата от агента."""
-        if isinstance(result, dict):
+        elif request_type == "SEARCH":
+            params = context.get("parameters", {})
+            total = context.get("total_found", 0)
+            validated = context.get("validated_count", 0)
+            parts.append(f"ТИП: Результаты поиска")
+            parts.append(f"Профессии: {', '.join(params.get('professions', []))}")
+            parts.append(f"Город: {params.get('city', 'не указан')}")
+            parts.append(f"Найдено: {validated} подходящих из {total} всего")
+
+        elif request_type == "PROFILE":
+            parts.append("ТИП: Вопрос о профиле")
+            parts.append(f"Сообщение: {context.get('message', '')}")
+
+        else:
+            parts.append("ТИП: Обычный диалог")
+            parts.append(f"Сообщение: {context.get('message', '')}")
+
+        user_prompt = "\n".join(parts)
+
+        try:
+            result = await self.main_llm.chat(
+                system_prompt=COMPOSER_SYSTEM_PROMPT,
+                user_message=user_prompt,
+                max_tokens=500,
+            )
+            # Убираем кавычки если ответ обёрнут в них
+            result = result.strip().strip('"').strip("'")
             return result
+        except Exception as e:
+            print(f"[AI] Composer error: {e}")
+            # Fallback ответы
+            if request_type == "CLARIFICATION":
+                return context.get("question", "Уточни, пожалуйста, что именно ищешь?")
+            elif request_type == "SEARCH":
+                count = context.get("validated_count", 0)
+                return f"Нашёл {count} вакансий."
+            else:
+                return "Привет! Я помогу найти работу. Напиши профессию и город."
 
-        # Пробуем найти JSON в тексте
-        text = str(result)
+    def _parse_json(self, text: str) -> dict:
+        """Парсинг JSON из ответа LLM."""
+        if isinstance(text, dict):
+            return text
 
-        # Ищем JSON блок
-        import re
+        text = str(text).strip()
+
+        # Убираем markdown блоки кода
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0]
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0]
+
+        # Ищем JSON объект
         json_match = re.search(r'\{[\s\S]*\}', text)
-
         if json_match:
             try:
                 return json.loads(json_match.group())
             except json.JSONDecodeError:
                 pass
 
-        # Возвращаем как текст
-        return {"response_text": text, "request_type": "CHAT"}
-
-
-# Глобальный менеджер сессий
-session_manager = SessionManager()
+        # Пробуем весь текст
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {}
 
 
 async def process_chat_message(
@@ -377,31 +575,15 @@ async def process_chat_message(
     use_live_search: bool = True,
 ) -> CrewResult:
     """
-    Удобная функция для обработки сообщения чата.
-
-    Args:
-        user_id: ID пользователя
-        message: Сообщение
-        chat_id: ID чата (опционально)
-        user_data: Данные пользователя (опционально)
-        use_live_search: Использовать live поиск
-
-    Returns:
-        CrewResult с ответом
+    Удобная функция для обработки сообщения.
     """
-    # Получаем или создаём сессию
     session = session_manager.get_or_create_session(user_id, chat_id)
-
-    # Создаём Crew и обрабатываем
     crew = JobSearchCrew(user_id, user_data, session)
     result = await crew.process_message(
         message=message,
         conversation_history=session.get_recent_history(),
         use_live_search=use_live_search,
     )
-
-    # Сохраняем в историю
     session.add_message("user", message)
     session.add_message("assistant", result.response_text)
-
     return result
