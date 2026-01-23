@@ -135,22 +135,22 @@ class SubscriptionService:
                             remaining=remaining,
                         )
 
-            # Дефолтные лимиты если записи нет
+            # Дефолтные лимиты если записи нет - разрешаем
             return RequestLimits(
-                daily_limit=0,
+                daily_limit=99,
                 daily_used=0,
                 bonus_requests=0,
-                can_use=False,
-                remaining=0,
+                can_use=True,
+                remaining=99,
             )
         except Exception as e:
             print(f"[Subscription] get_limits error: {e}")
             return RequestLimits(
-                daily_limit=0,
+                daily_limit=99,
                 daily_used=0,
                 bonus_requests=0,
-                can_use=False,
-                remaining=0,
+                can_use=True,
+                remaining=99,
             )
 
     async def get_full_status(self, user_id: str) -> SubscriptionStatus:
@@ -195,7 +195,9 @@ class SubscriptionService:
             status = await self.get_full_status(user_id)
 
             if not status.subscription:
-                return False, "Подписка не найдена. Пожалуйста, зарегистрируйтесь."
+                # Нет записи подписки - пропускаем (пользователь может быть новый)
+                print(f"[Subscription] No subscription found for user {user_id}, allowing request")
+                return True, "OK (no subscription record)"
 
             plan = status.subscription.plan
             sub_status = status.subscription.status
@@ -221,7 +223,8 @@ class SubscriptionService:
 
         except Exception as e:
             print(f"[Subscription] check_and_use_request error: {e}")
-            return False, f"Ошибка проверки лимитов: {str(e)}"
+            # При ошибке Supabase - пропускаем запрос (чтобы AI работал)
+            return True, "OK (subscription check skipped)"
 
     async def _use_request(self, user_id: str, limits: RequestLimits) -> None:
         """Использовать один запрос"""
