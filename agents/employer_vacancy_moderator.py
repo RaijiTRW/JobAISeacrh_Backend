@@ -4,17 +4,18 @@
 import json
 from typing import Optional, Dict
 import httpx
-from config import settings
+from config import get_settings
 
 
 class EmployerVacancyModerator:
     """AI модератор для вакансий работодателей"""
 
     def __init__(self):
+        settings = get_settings()
         self.client = httpx.AsyncClient(timeout=60.0)
-        self.api_key = settings.OPENROUTER_API_KEY
-        self.base_url = settings.OPENROUTER_BASE_URL
-        self.model = settings.MODEL_NAME
+        self.api_key = settings.openrouter_api_key
+        self.base_url = settings.openrouter_base_url
+        self.model = settings.model_name
 
     async def check_vacancy(
         self,
