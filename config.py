@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     validator_model_name: str = "anthropic/claude-3-haiku"  # Быстрая модель для валидации
     max_tokens: int = 4096
 
+    # CrewAI Settings
+    crewai_verbose: bool = False  # Подробный вывод агентов
+    crewai_max_iterations: int = 10  # Максимум итераций для агента
+    crewai_temperature: float = 0.7  # Температура для основной модели
+    crewai_validator_temperature: float = 0.1  # Температура для валидатора (более детерминированный)
+
     # Search settings
     max_vacancies_per_source: int = 200  # Вакансий с каждого источника (HH, SuperJob)
     max_total_vacancies: int = 500  # Минимум 500 вакансий для пользователя

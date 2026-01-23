@@ -1,6 +1,6 @@
 """
 API эндпоинты для чата
-Упрощенная архитектура: извлечение параметров → поиск → валидация → результат
+Архитектура CrewAI: интерактивный AI-партнер по поиску работы
 """
 
 from fastapi import APIRouter, HTTPException
@@ -18,19 +18,16 @@ def json_serializer(obj):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
+
 from models.chat import ChatRequest, ChatResponse, UserPreferences
 from models.vacancy import SearchFilters
-from agents.param_extractor import param_extractor
-from agents.validator import validator
+from agents.crewai import JobSearchCrew, session_manager
 from tools.search import vacancy_search
 from services.user_profile import user_profile_service
 from services.subscription_service import subscription_service
 from config import get_settings
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-
-# Временное хранилище сессий (в проде использовать Redis)
-sessions: dict[str, dict] = {}
 
 
 class ChatMessageRequest(BaseModel):
@@ -51,8 +48,8 @@ class ChatMessageResponse(BaseModel):
 @router.post("/message", response_model=ChatMessageResponse)
 async def send_message(request: ChatMessageRequest):
     """
-    Отправка сообщения в чат
-    Простой поток: извлечение параметров → поиск → валидация → результат
+    Отправка сообщения в чат.
+    CrewAI: интерактивный AI-партнер, задаёт уточняющие вопросы при необходимости.
     """
     # Проверяем лимит запросов
     can_use, limit_message = await subscription_service.check_and_use_request(request.user_id)
@@ -61,477 +58,144 @@ async def send_message(request: ChatMessageRequest):
 
     # Проверяем доступ к поиску в сети (Base план не имеет доступа)
     status = await subscription_service.get_full_status(request.user_id)
+    use_live_search = request.search_online
     if status.subscription and not status.subscription.can_search_online:
-        request.search_online = False  # Принудительно отключаем для Base плана
+        use_live_search = False  # Принудительно отключаем для Base плана
 
     # Получаем или создаём сессию
-    session_key = f"{request.user_id}_{request.chat_id or 'new'}"
-
-    if session_key not in sessions:
-        sessions[session_key] = {
-            "history": [],
-            "preferences": UserPreferences(),
-        }
-
-    session = sessions[session_key]
+    session = session_manager.get_or_create_session(
+        request.user_id,
+        request.chat_id
+    )
 
     # Получаем данные профиля пользователя
     user_data = await user_profile_service.get_user_data(request.user_id)
+    user_data_dict = user_data.model_dump(mode='json') if user_data else {}
 
-    # === ШАГ 1: Извлекаем параметры из сообщения ===
-    preferences, needs_clarification, clarification_msg = await param_extractor.extract(
-        request.message,
-        session["preferences"],
-        user_data,
-        session["history"],  # Передаем историю для контекста
+    print(f"[Chat] Processing message: {request.message[:50]}...")
+
+    # Запускаем CrewAI
+    crew = JobSearchCrew(
+        user_id=request.user_id,
+        user_data=user_data_dict,
+        session=session,
     )
-    session["preferences"] = preferences
 
-    print(f"[Chat] Extracted: query={preferences.query}, city={preferences.city}, salary={preferences.salary_from}")
+    result = await crew.process_message(
+        message=request.message,
+        conversation_history=session.get_recent_history(),
+        use_live_search=use_live_search,
+    )
 
-    # Добавляем сообщение в историю
-    session["history"].append({
-        "role": "user",
-        "content": request.message,
-    })
+    # Сохраняем в историю
+    session.add_message("user", request.message)
+    session.add_message("assistant", result.response_text)
 
-    # === ШАГ 2: Если нужна дополнительная информация - спрашиваем ===
-    if needs_clarification:
-        response_message = clarification_msg or "Уточни детали пожалуйста"
+    print(f"[Chat] Response type: {result.request_type}, vacancies: {len(result.vacancies)}")
 
-        session["history"].append({
-            "role": "assistant",
-            "content": response_message,
-        })
-
-        return ChatMessageResponse(
-            message=response_message,
-            vacancies=[],
-            chat_id=session_key,
-        )
-
-    # === ШАГ 3: Генерируем варианты запросов ===
-    queries = await param_extractor.generate_queries(preferences.query)
-    print(f"[Chat] Generated queries: {queries}")
-
-    # === ШАГ 4: Поэтапный поиск и валидация ===
-    all_validated = []
-    all_rejected = []
-    total_found = 0
-
-    # Режим: Лента + Сеть (поэтапная валидация)
-    if request.search_in_feed and request.search_online:
-        # 4.1: Поиск в БД
-        db_filters = SearchFilters(
-            queries=queries,
-            city=preferences.city,
-            salary_from=preferences.salary_from,
-            salary_to=preferences.salary_to,
-            experience=preferences.experience,
-            employment_type=preferences.employment_type,
-            exclude_keywords=preferences.exclude_keywords,
-            exclude_vacancy_ids=request.exclude_vacancy_ids,
-            search_in_feed=True,
-            search_online=False,
-        )
-        db_result = await vacancy_search.search(db_filters)
-        print(f"[Chat] БД: найдено {len(db_result.vacancies)} вакансий")
-        total_found += db_result.total_found
-
-        # 4.2: Валидация БД
-        try:
-            db_validation = await validator.validate_batch(
-                db_result.vacancies,
-                preferences,
-                queries=queries,
-                required_city=preferences.city,
-            )
-            all_validated.extend(db_validation.validated)
-            all_rejected.extend(db_validation.rejected)
-            print(f"[Chat] БД: {len(db_validation.validated)} подходящих")
-        except Exception as e:
-            print(f"[Chat] Validator error for DB results, using all vacancies: {e}")
-            all_validated.extend(db_result.vacancies)
-            print(f"[Chat] БД: {len(db_result.vacancies)} (без валидации)")
-
-        # 4.3: Поиск в сети (ВСЕГДА, независимо от результатов БД)
-        online_filters = SearchFilters(
-            queries=queries,
-            city=preferences.city,
-            salary_from=preferences.salary_from,
-            salary_to=preferences.salary_to,
-            experience=preferences.experience,
-            employment_type=preferences.employment_type,
-            exclude_keywords=preferences.exclude_keywords,
-            exclude_vacancy_ids=request.exclude_vacancy_ids,
-            search_in_feed=False,
-            search_online=True,
-        )
-        online_result = await vacancy_search.search(online_filters)
-        print(f"[Chat] Сеть: найдено {len(online_result.vacancies)} вакансий")
-        total_found += online_result.total_found
-
-        # 4.4: Валидация сети (исключая дубликаты из БД)
-        seen_ids = {v.id for v in all_validated}
-        unique_online = [v for v in online_result.vacancies if v.id not in seen_ids]
-        print(f"[Chat] Сеть: {len(unique_online)} уникальных после дедупликации")
-
-        try:
-            online_validation = await validator.validate_batch(
-                unique_online,
-                preferences,
-                queries=queries,
-                required_city=preferences.city,
-            )
-            all_validated.extend(online_validation.validated)
-            all_rejected.extend(online_validation.rejected)
-            print(f"[Chat] Сеть: {len(online_validation.validated)} подходящих")
-        except Exception as e:
-            print(f"[Chat] Validator error for online results, using all vacancies: {e}")
-            all_validated.extend(unique_online)
-            print(f"[Chat] Сеть: {len(unique_online)} (без валидации)")
-
-    # Режим: Только лента ИЛИ только сеть
-    else:
-        filters = SearchFilters(
-            queries=queries,
-            city=preferences.city,
-            salary_from=preferences.salary_from,
-            salary_to=preferences.salary_to,
-            experience=preferences.experience,
-            employment_type=preferences.employment_type,
-            exclude_keywords=preferences.exclude_keywords,
-            exclude_vacancy_ids=request.exclude_vacancy_ids,
-            search_in_feed=request.search_in_feed,
-            search_online=request.search_online,
-        )
-
-        search_result = await vacancy_search.search(filters)
-        total_found = search_result.total_found
-        print(f"[Chat] Найдено {len(search_result.vacancies)} вакансий")
-
-        try:
-            validation_result = await validator.validate_batch(
-                search_result.vacancies,
-                preferences,
-                queries=queries,
-                required_city=preferences.city,
-            )
-            all_validated = validation_result.validated
-            all_rejected = validation_result.rejected
-            print(f"[Chat] {len(all_validated)} подходящих")
-        except Exception as e:
-            print(f"[Chat] Validator error, using all vacancies: {e}")
-            all_validated = search_result.vacancies
-            all_rejected = []
-            print(f"[Chat] {len(all_validated)} (без валидации)")
-
-    # === ШАГ 5: Формируем ответ ===
-    response_message = f"Нашёл {len(all_validated)} подходящих вакансий из {total_found} найденных."
-
-    vacancies_json = [v.model_dump(mode='json') for v in all_validated]
-    rejected_json = [v.model_dump(mode='json') for v in all_rejected]
-
-    session["history"].append({
-        "role": "assistant",
-        "content": response_message,
-    })
+    # Конвертируем вакансии в JSON
+    vacancies_json = []
+    for v in result.vacancies:
+        if hasattr(v, 'model_dump'):
+            vacancies_json.append(v.model_dump(mode='json'))
+        elif isinstance(v, dict):
+            vacancies_json.append(v)
 
     return ChatMessageResponse(
-        message=response_message,
+        message=result.response_text,
         vacancies=vacancies_json,
-        chat_id=session_key,
+        chat_id=session.id,
     )
 
 
 @router.post("/message/stream")
 async def send_message_stream(request: ChatMessageRequest):
     """
-    Отправка сообщения со стримингом ответа
-    Простой поток: извлечение параметров → поиск → валидация → результат
+    Отправка сообщения со стримингом ответа.
+    CrewAI с progressive loading вакансий.
     """
     # Проверяем лимит запросов
     can_use, limit_message = await subscription_service.check_and_use_request(request.user_id)
     if not can_use:
         raise HTTPException(status_code=402, detail=limit_message)
 
-    # Проверяем доступ к поиску в сети (Base план не имеет доступа)
+    # Проверяем доступ к поиску в сети
     status = await subscription_service.get_full_status(request.user_id)
+    use_live_search = request.search_online
     if status.subscription and not status.subscription.can_search_online:
-        request.search_online = False  # Принудительно отключаем для Base плана
+        use_live_search = False
 
-    session_key = f"{request.user_id}_{request.chat_id or 'new'}"
+    # Получаем или создаём сессию
+    session = session_manager.get_or_create_session(
+        request.user_id,
+        request.chat_id
+    )
 
-    if session_key not in sessions:
-        sessions[session_key] = {
-            "history": [],
-            "preferences": UserPreferences(),
-        }
-
-    session = sessions[session_key]
-
-    # Получаем данные профиля пользователя
+    # Получаем данные профиля
     user_data = await user_profile_service.get_user_data(request.user_id)
+    user_data_dict = user_data.model_dump(mode='json') if user_data else {}
 
-    session["history"].append({
-        "role": "user",
-        "content": request.message,
-    })
+    session.add_message("user", request.message)
 
     async def generate():
-        """Генератор для SSE"""
+        """Генератор для SSE с CrewAI"""
 
-        # === ШАГ 1: Извлекаем параметры ===
-        preferences, needs_clarification, clarification_msg = await param_extractor.extract(
-            request.message,
-            session["preferences"],
-            user_data,
-            session["history"],  # Передаем историю для контекста
+        # Отправляем начальный статус
+        yield f"data: {json.dumps({'type': 'progress', 'message': 'Анализирую запрос...'})}\n\n"
+
+        # Запускаем CrewAI
+        crew = JobSearchCrew(
+            user_id=request.user_id,
+            user_data=user_data_dict,
+            session=session,
         )
-        session["preferences"] = preferences
 
-        # === ШАГ 2: Если нужна информация - спрашиваем ===
-        if needs_clarification:
-            response_message = clarification_msg or "Уточни детали пожалуйста"
+        try:
+            result = await crew.process_message(
+                message=request.message,
+                conversation_history=session.get_recent_history(limit=10),
+                use_live_search=use_live_search,
+            )
 
-            # Стримим ответ
-            words = response_message.split()
+            # Стримим текстовый ответ по словам
+            words = result.response_text.split()
             for word in words:
                 yield f"data: {json.dumps({'type': 'text', 'content': word + ' '})}\n\n"
-                await asyncio.sleep(0.03)
+                await asyncio.sleep(0.02)
 
-            yield f"data: {json.dumps({'type': 'done', 'chat_id': session_key})}\n\n"
+            # Отправляем вакансии если есть
+            if result.vacancies and result.show_vacancies:
+                vacancies_json = []
+                for v in result.vacancies:
+                    if hasattr(v, 'model_dump'):
+                        vacancies_json.append(v.model_dump(mode='json'))
+                    elif isinstance(v, dict):
+                        vacancies_json.append(v)
 
-            session["history"].append({
-                "role": "assistant",
-                "content": response_message,
-            })
-            return
+                # Отправляем вакансии чанками для progressive loading
+                chunk_size = 10
+                for i in range(0, len(vacancies_json), chunk_size):
+                    chunk = vacancies_json[i:i+chunk_size]
+                    source = "database" if i == 0 else "search"
+                    yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': chunk, 'source': source}, default=json_serializer)}\n\n"
+                    await asyncio.sleep(0.05)
 
-        # === ШАГ 3: Генерируем варианты запросов ===
-        queries = await param_extractor.generate_queries(preferences.query)
+            # Сохраняем в историю
+            session.add_message("assistant", result.response_text)
 
-        # === ШАГ 4: Поэтапный поиск и валидация ===
-        all_validated = []
-        all_rejected = []
-        total_found = 0
-        seen_ids = set()
+            # Завершение
+            yield f"data: {json.dumps({'type': 'done', 'chat_id': session.id})}\n\n"
 
-        # Отправляем начальное сообщение
-        yield f"data: {json.dumps({'type': 'text', 'content': 'Ищу вакансии '})}\n\n"
-        await asyncio.sleep(0.05)
+        except Exception as e:
+            print(f"[Chat Stream] Error: {e}")
+            import traceback
+            traceback.print_exc()
 
-        # Режим: Лента + Сеть (поэтапная валидация с progressive loading)
-        if request.search_in_feed and request.search_online:
-            # 4.1: Поиск в БД
-            db_filters = SearchFilters(
-                queries=queries,
-                city=preferences.city,
-                salary_from=preferences.salary_from,
-                salary_to=preferences.salary_to,
-                experience=preferences.experience,
-                employment_type=preferences.employment_type,
-                exclude_keywords=preferences.exclude_keywords,
-                exclude_vacancy_ids=request.exclude_vacancy_ids,
-                search_in_feed=True,
-                search_online=False,
-            )
-            db_result = await vacancy_search.search(db_filters)
-            total_found += db_result.total_found
+            error_message = "Произошла ошибка при обработке запроса. Попробуй ещё раз."
+            yield f"data: {json.dumps({'type': 'text', 'content': error_message})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'chat_id': session.id})}\n\n"
 
-            # 4.2: Валидация БД
-            # Добавляем ВСЕ ID из БД в seen_ids (чтобы не было дубликатов)
-            seen_ids.update(v.id for v in db_result.vacancies)
-
-            try:
-                db_validation = await validator.validate_batch(
-                    db_result.vacancies,
-                    preferences,
-                    queries=queries,
-                    required_city=preferences.city,
-                )
-                all_validated.extend(db_validation.validated)
-                all_rejected.extend(db_validation.rejected)
-
-                # Отправляем результаты БД сразу
-                if db_validation.validated:
-                    db_vacancies_json = [v.model_dump(mode='json') for v in db_validation.validated]
-                    yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': db_vacancies_json, 'source': 'database'}, default=json_serializer)}\n\n"
-                    yield f"data: {json.dumps({'type': 'text', 'content': f'(найдено {len(all_validated)} из базы) '})}\n\n"
-            except Exception as e:
-                print(f"[Stream] Validator error for DB results, sending without validation: {e}")
-                # Fallback: отправляем все вакансии без валидации
-                all_validated.extend(db_result.vacancies)
-                db_vacancies_json = [v.model_dump(mode='json') for v in db_result.vacancies]
-                yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': db_vacancies_json, 'source': 'database'}, default=json_serializer)}\n\n"
-                yield f"data: {json.dumps({'type': 'text', 'content': f'(найдено {len(all_validated)} из базы) '})}\n\n"
-
-            # 4.3: Быстрый поиск (HH + SuperJob) БЕЗ Avito
-            fast_result = await vacancy_search._search_live_fast(
-                SearchFilters(
-                    queries=queries,
-                    city=preferences.city,
-                    salary_from=preferences.salary_from,
-                    salary_to=preferences.salary_to,
-                    experience=preferences.experience,
-                    employment_type=preferences.employment_type,
-                    exclude_keywords=preferences.exclude_keywords,
-                    exclude_vacancy_ids=request.exclude_vacancy_ids,
-                )
-            )
-            total_found += len(fast_result)
-
-            # Валидация быстрых результатов (исключаем дубликаты)
-            unique_fast = [v for v in fast_result if v.id not in seen_ids]
-            # Добавляем ID в seen_ids ДО валидации
-            seen_ids.update(v.id for v in unique_fast)
-
-            if unique_fast:
-                try:
-                    fast_validation = await validator.validate_batch(
-                        unique_fast,
-                        preferences,
-                        queries=queries,
-                        required_city=preferences.city,
-                    )
-                    all_validated.extend(fast_validation.validated)
-                    all_rejected.extend(fast_validation.rejected)
-
-                    # Отправляем HH + SuperJob сразу
-                    if fast_validation.validated:
-                        fast_vacancies_json = [v.model_dump(mode='json') for v in fast_validation.validated]
-                        yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': fast_vacancies_json, 'source': 'hh_superjob'}, default=json_serializer)}\n\n"
-                        yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(fast_validation.validated)} из HH/SuperJob) '})}\n\n"
-                except Exception as e:
-                    print(f"[Stream] Validator error for fast results, sending without validation: {e}")
-                    # Fallback: отправляем все вакансии без валидации
-                    all_validated.extend(unique_fast)
-                    fast_vacancies_json = [v.model_dump(mode='json') for v in unique_fast]
-                    yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': fast_vacancies_json, 'source': 'hh_superjob'}, default=json_serializer)}\n\n"
-                    yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(unique_fast)} из HH/SuperJob) '})}\n\n"
-
-            # 4.4: Медленный поиск Avito (в фоне, стримим по мере готовности)
-            # ВАЖНО: Ограничиваем до 20 вакансий и 180 сек для live-поиска (чтобы не было timeout)
-            from tools.parsers.avito import AvitoParser
-            avito_parser = AvitoParser()
-            try:
-                # Отправляем heartbeat перед долгой операцией
-                yield f"data: {json.dumps({'type': 'progress', 'message': 'Ищу на Avito...'})}\n\n"
-
-                avito_filters = SearchFilters(
-                    query=queries[0] if queries else "",
-                    city=preferences.city,
-                    salary_from=preferences.salary_from,
-                    salary_to=preferences.salary_to,
-                    experience=preferences.experience,
-                    employment_type=preferences.employment_type,
-                    exclude_keywords=preferences.exclude_keywords,
-                    exclude_vacancy_ids=request.exclude_vacancy_ids,
-                )
-                # Лимит 20 для live-поиска (scheduler использует 200)
-                # Timeout 180 сек (3 минуты максимум)
-                avito_result = await asyncio.wait_for(
-                    avito_parser.search(avito_filters, limit=20),
-                    timeout=180.0
-                )
-                total_found += len(avito_result)
-
-                # Валидация Avito (исключаем дубликаты)
-                unique_avito = [v for v in avito_result if v.id not in seen_ids]
-                # Добавляем ID в seen_ids ДО валидации
-                seen_ids.update(v.id for v in unique_avito)
-
-                if unique_avito:
-                    try:
-                        avito_validation = await validator.validate_batch(
-                            unique_avito,
-                            preferences,
-                            queries=queries,
-                            required_city=preferences.city,
-                        )
-                        all_validated.extend(avito_validation.validated)
-                        all_rejected.extend(avito_validation.rejected)
-
-                        # Отправляем Avito результаты
-                        if avito_validation.validated:
-                            avito_vacancies_json = [v.model_dump(mode='json') for v in avito_validation.validated]
-                            yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': avito_vacancies_json, 'source': 'avito'}, default=json_serializer)}\n\n"
-                            yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(avito_validation.validated)} из Avito) '})}\n\n"
-                    except Exception as e:
-                        print(f"[Stream] Validator error for Avito results, sending without validation: {e}")
-                        # Fallback: отправляем все вакансии без валидации
-                        all_validated.extend(unique_avito)
-                        avito_vacancies_json = [v.model_dump(mode='json') for v in unique_avito]
-                        yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': avito_vacancies_json, 'source': 'avito'}, default=json_serializer)}\n\n"
-                        yield f"data: {json.dumps({'type': 'text', 'content': f'(+{len(unique_avito)} из Avito) '})}\n\n"
-
-            except Exception as e:
-                print(f"[Chat] Avito error: {e}")
-                yield f"data: {json.dumps({'type': 'progress', 'message': 'Ошибка загрузки с Avito, продолжаю...'})}\n\n"
-
-        # Режим: Только лента ИЛИ только сеть
-        else:
-            filters = SearchFilters(
-                queries=queries,
-                city=preferences.city,
-                salary_from=preferences.salary_from,
-                salary_to=preferences.salary_to,
-                experience=preferences.experience,
-                employment_type=preferences.employment_type,
-                exclude_keywords=preferences.exclude_keywords,
-                exclude_vacancy_ids=request.exclude_vacancy_ids,
-                search_in_feed=request.search_in_feed,
-                search_online=request.search_online,
-            )
-
-            search_result = await vacancy_search.search(filters)
-            total_found = search_result.total_found
-
-            validation_result = await validator.validate_batch(
-                search_result.vacancies,
-                preferences,
-                queries=queries,
-                required_city=preferences.city,
-            )
-            all_validated = validation_result.validated
-            all_rejected = validation_result.rejected
-
-        # === ШАГ 5: Итоговое сообщение ===
-        response_message = f"\n\nИтого: {len(all_validated)} подходящих вакансий из {total_found} найденных."
-
-        # Для progressive loading режима - просто добавляем итоговое сообщение
-        if request.search_in_feed and request.search_online:
-            yield f"data: {json.dumps({'type': 'text', 'content': response_message})}\n\n"
-
-            # Отправляем отсеянные
-            rejected_json = [v.model_dump(mode='json') for v in all_rejected]
-            if rejected_json:
-                yield f"data: {json.dumps({'type': 'rejected_vacancies', 'content': rejected_json}, default=json_serializer)}\n\n"
-
-        # Для обычного режима - стримим ответ и отправляем все вакансии
-        else:
-            words = response_message.split()
-            for word in words:
-                yield f"data: {json.dumps({'type': 'text', 'content': word + ' '})}\n\n"
-                await asyncio.sleep(0.03)
-
-            # Отправляем вакансии
-            vacancies_json = [v.model_dump(mode='json') for v in all_validated]
-            if vacancies_json:
-                yield f"data: {json.dumps({'type': 'vacancies', 'content': vacancies_json}, default=json_serializer)}\n\n"
-
-            # Отправляем отсеянные
-            rejected_json = [v.model_dump(mode='json') for v in all_rejected]
-            if rejected_json:
-                yield f"data: {json.dumps({'type': 'rejected_vacancies', 'content': rejected_json}, default=json_serializer)}\n\n"
-
-        # Завершение
-        yield f"data: {json.dumps({'type': 'done', 'chat_id': session_key})}\n\n"
-
-        session["history"].append({
-            "role": "assistant",
-            "content": response_message,
-        })
+            session.add_message("assistant", error_message)
 
     return StreamingResponse(
         generate(),
@@ -546,19 +210,26 @@ async def send_message_stream(request: ChatMessageRequest):
 @router.delete("/{chat_id}")
 async def delete_chat(chat_id: str, user_id: str):
     """Удаление чата"""
-    session_key = f"{user_id}_{chat_id}"
-    if session_key in sessions:
-        del sessions[session_key]
+    session_manager.delete_session(user_id, chat_id)
     return {"status": "ok"}
 
 
 @router.get("/preferences/{user_id}")
 async def get_preferences(user_id: str, chat_id: Optional[str] = None):
-    """Получение текущих предпочтений"""
-    session_key = f"{user_id}_{chat_id or 'new'}"
-    if session_key in sessions:
-        return sessions[session_key]["preferences"].model_dump()
-    return UserPreferences().model_dump()
+    """Получение текущих предпочтений из сессии"""
+    session = session_manager.get_session(user_id, chat_id)
+    if session:
+        return session.preferences.model_dump()
+    return {"city": None, "professions": [], "salary_from": None}
+
+
+@router.get("/history/{user_id}")
+async def get_history(user_id: str, chat_id: Optional[str] = None, limit: int = 20):
+    """Получение истории чата"""
+    session = session_manager.get_session(user_id, chat_id)
+    if session:
+        return {"history": session.get_recent_history(limit=limit)}
+    return {"history": []}
 
 
 # === Support Chat (FloatingChat) ===
