@@ -460,17 +460,46 @@ class JobSearchCrew:
             # Извлекаем ID прошедших валидацию
             validated_ids = set()
             for item in validation.get("validated", []):
-                validated_ids.add(str(item.get("id", "")))
+                vid = str(item.get("id", ""))
+                validated_ids.add(vid)
+
+            print(f"[AI] Validator returned {len(validated_ids)} accepted, {len(validation.get('rejected', []))} rejected")
 
             # Если валидатор ничего не вернул - возвращаем все
             if not validated_ids:
+                print(f"[AI] Validator returned no IDs, returning all {len(vacancies)} vacancies")
                 return vacancies
 
-            # Фильтруем
+            # Фильтруем - пробуем несколько форматов ID
+            vacancy_ids = {str(getattr(v, 'id', '')) for v in vacancies}
+            print(f"[AI] Vacancy IDs sample: {list(vacancy_ids)[:3]}")
+            print(f"[AI] Validated IDs sample: {list(validated_ids)[:3]}")
+
             validated = [v for v in vacancies if str(getattr(v, 'id', '')) in validated_ids]
+
+            # Если ID не совпали (разный формат) - пробуем без префикса
+            if not validated and validated_ids:
+                # Пробуем сопоставить без префикса "hh_", "sj_", "avito_"
+                stripped_validated = set()
+                for vid in validated_ids:
+                    stripped_validated.add(vid)
+                    # Убираем префикс если есть
+                    for prefix in ["hh_", "sj_", "avito_", "superjob_"]:
+                        if vid.startswith(prefix):
+                            stripped_validated.add(vid[len(prefix):])
+                        else:
+                            stripped_validated.add(f"{prefix}{vid}")
+
+                validated = [
+                    v for v in vacancies
+                    if str(getattr(v, 'id', '')) in stripped_validated
+                    or str(getattr(v, 'id', '')).split('_', 1)[-1] in validated_ids
+                ]
+                print(f"[AI] After prefix-aware matching: {len(validated)}")
 
             # Если после фильтрации осталось слишком мало - возвращаем все
             if len(validated) < 3 and len(vacancies) > 5:
+                print(f"[AI] Too few validated ({len(validated)}), returning all {len(vacancies)}")
                 return vacancies
 
             return validated
