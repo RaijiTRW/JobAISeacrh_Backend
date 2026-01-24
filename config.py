@@ -9,7 +9,8 @@ class Settings(BaseSettings):
 
     # Supabase
     supabase_url: str = ""
-    supabase_key: str = ""
+    supabase_key: str = ""  # anon key (for client-side, subject to RLS)
+    supabase_service_key: str = ""  # service role key (bypasses RLS, for admin operations)
 
     # App settings
     debug: bool = False
