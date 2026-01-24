@@ -14,7 +14,6 @@ from scheduler.scheduler import (
     trigger_parsing_now,
     trigger_verification_now,
     trigger_old_parsing_now,
-    trigger_moderation_now,
 )
 from scheduler.jobs import run_avito_parsing, run_mass_parsing, run_moderation
 

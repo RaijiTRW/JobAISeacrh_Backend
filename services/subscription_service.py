@@ -188,42 +188,21 @@ class SubscriptionService:
     async def check_and_use_request(self, user_id: str) -> tuple[bool, str]:
         """
         Проверить лимит и использовать запрос.
-        Возвращает (can_use, message)
+        Только проверяет лимиты из БД, не управляет подписками.
+        Управление подписками (создание, истечение, даунгрейд) — на Next.js API.
         """
         try:
-            # Получаем статус
-            status = await self.get_full_status(user_id)
+            limits = await self.get_limits(user_id)
 
-            if not status.subscription:
-                # Нет записи подписки - пропускаем (пользователь может быть новый)
-                print(f"[Subscription] No subscription found for user {user_id}, allowing request")
-                return True, "OK (no subscription record)"
-
-            plan = status.subscription.plan
-            sub_status = status.subscription.status
-
-            # Pro подписка истекла
-            if plan == "pro" and sub_status == "expired":
-                return False, "Подписка Pro истекла. Продлите подписку."
-
-            if sub_status == "cancelled":
-                return False, "Подписка отменена. Оформите новую подписку."
-
-            # Все активные планы (pro_trial, base, pro) могут использовать запросы
-            # Просто проверяем лимиты
-            if not status.limits.can_use:
-                if status.is_base:
-                    return False, "Лимит запросов исчерпан. Оформите Pro для большего количества запросов."
-                else:
-                    return False, "Лимит запросов исчерпан. Докупите запросы или подождите до завтра."
+            if not limits.can_use:
+                return False, "Лимит запросов исчерпан."
 
             # Используем запрос
-            await self._use_request(user_id, status.limits)
+            await self._use_request(user_id, limits)
             return True, "OK"
 
         except Exception as e:
             print(f"[Subscription] check_and_use_request error: {e}")
-            # При ошибке Supabase - пропускаем запрос (чтобы AI работал)
             return True, "OK (subscription check skipped)"
 
     async def _use_request(self, user_id: str, limits: RequestLimits) -> None:
@@ -406,7 +385,7 @@ class SubscriptionService:
                     json={
                         "plan": "base",
                         "status": "active",
-                        "expires_at": None,  # Base навсегда
+                        "expires_at": "2099-12-31T00:00:00Z",  # Base навсегда
                         "can_search_online": False,  # Только лента
                         "updated_at": now.isoformat(),
                     },
