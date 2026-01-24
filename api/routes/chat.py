@@ -26,6 +26,7 @@ from tools.search import vacancy_search
 from services.user_profile import user_profile_service
 from services.subscription_service import subscription_service
 from config import get_settings
+from agents.agents_config import track_usage
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -335,6 +336,18 @@ async def support_chat(request: SupportChatRequest):
 
             if response.status_code == 200:
                 data = response.json()
+                # Трекинг токенов для support chat
+                usage = data.get("usage", {})
+                if usage:
+                    try:
+                        track_usage(
+                            "support_chat",
+                            settings.model_name,
+                            usage.get("prompt_tokens", 0),
+                            usage.get("completion_tokens", 0),
+                        )
+                    except Exception:
+                        pass
                 ai_response = data["choices"][0]["message"]["content"]
                 return SupportChatResponse(response=ai_response, connect_to_admin=needs_admin)
             else:

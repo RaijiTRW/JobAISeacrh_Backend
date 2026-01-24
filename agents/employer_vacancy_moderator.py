@@ -5,10 +5,13 @@ import json
 from typing import Optional, Dict
 import httpx
 from config import get_settings
+from agents.agents_config import is_agent_enabled, track_usage
 
 
 class EmployerVacancyModerator:
     """AI модератор для вакансий работодателей"""
+
+    AGENT_ID = "employer_moderator"
 
     def __init__(self):
         settings = get_settings()
@@ -27,13 +30,12 @@ class EmployerVacancyModerator:
     ) -> Dict[str, any]:
         """
         Проверка вакансии на соответствие правилам платформы.
-
-        Returns:
-            {
-                "approved": bool,
-                "reason": str (если не одобрено)
-            }
         """
+        # Проверяем, включён ли агент
+        if not is_agent_enabled(self.AGENT_ID):
+            print(f"[EmployerVacancyModerator] DISABLED - auto-approving '{title}'")
+            return {"approved": True}
+
         vacancy_data = {
             "title": title,
             "company": company,
@@ -60,11 +62,20 @@ class EmployerVacancyModerator:
 
             if response.status_code != 200:
                 print(f"[EmployerVacancyModerator] API error: {response.status_code}")
-                # При ошибке API - одобряем (чтобы не заблокировать легитимные вакансии)
-                # Админ проверит вручную
                 return {"approved": True}
 
             result = response.json()
+
+            # Трекинг токенов
+            usage = result.get("usage", {})
+            if usage:
+                track_usage(
+                    self.AGENT_ID,
+                    self.model,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                )
+
             content = result["choices"][0]["message"]["content"]
 
             # Парсим ответ AI

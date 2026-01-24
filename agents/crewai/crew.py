@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 from .llm_config import get_main_llm, get_fast_llm
 from .session_manager import Session, SessionManager, session_manager
+from agents.agents_config import is_agent_enabled
 
 # Импорты для поиска
 from tools.search import vacancy_search
@@ -318,15 +319,19 @@ class JobSearchCrew:
 Проанализируй запрос и верни JSON."""
 
         try:
+            if not is_agent_enabled("crew_analyst"):
+                print("[AI] Analyst DISABLED - defaulting to SEARCH")
+                return {"request_type": "SEARCH", "parameters": {"professions": [message], "city": ""}}
+
             result = await self.main_llm.chat(
                 system_prompt=ANALYST_SYSTEM_PROMPT,
                 user_message=user_prompt,
                 json_mode=True,
+                agent_id="crew_analyst",
             )
             return self._parse_json(result)
         except Exception as e:
             print(f"[AI] Analyst error: {e}")
-            # Fallback - пробуем простой анализ
             return {"request_type": "CHAT", "parameters": {}}
 
     async def _create_strategy(self, params: dict) -> dict:
@@ -343,15 +348,22 @@ class JobSearchCrew:
 Сгенерируй поисковые запросы (JSON)."""
 
         try:
+            if not is_agent_enabled("crew_strategist"):
+                print("[AI] Strategist DISABLED - using professions directly")
+                return {
+                    "queries": professions if professions else ["работа"],
+                    "search_config": {"city": city, "salary_from": salary},
+                }
+
             result = await self.fast_llm.chat(
                 system_prompt=STRATEGIST_SYSTEM_PROMPT,
                 user_message=user_prompt,
                 json_mode=True,
+                agent_id="crew_strategist",
             )
             return self._parse_json(result)
         except Exception as e:
             print(f"[AI] Strategy error: {e}")
-            # Fallback - используем профессии напрямую
             return {
                 "queries": professions if professions else ["работа"],
                 "search_config": {
@@ -417,6 +429,10 @@ class JobSearchCrew:
         if not vacancies:
             return []
 
+        if not is_agent_enabled("crew_validator"):
+            print(f"[AI] Validator DISABLED - returning all {len(vacancies)} vacancies")
+            return vacancies
+
         # Для большого числа вакансий - берём первые 50
         to_validate = vacancies[:50]
 
@@ -454,6 +470,7 @@ class JobSearchCrew:
                 user_message=user_prompt,
                 json_mode=True,
                 max_tokens=4000,
+                agent_id="crew_validator",
             )
             validation = self._parse_json(result)
 
@@ -516,6 +533,15 @@ class JobSearchCrew:
         user_name: str = None,
     ) -> str:
         """Формирование ответа пользователю."""
+        if not is_agent_enabled("crew_composer"):
+            print("[AI] Composer DISABLED - using fallback response")
+            if request_type == "CLARIFICATION":
+                return context.get("question", "Уточни, что ищешь?")
+            elif request_type == "SEARCH":
+                count = context.get("validated_count", 0)
+                return f"Нашёл {count} вакансий."
+            return "Привет! Напиши профессию и город для поиска."
+
         # Формируем промпт в зависимости от типа
         parts = []
 
@@ -553,8 +579,8 @@ class JobSearchCrew:
                 system_prompt=COMPOSER_SYSTEM_PROMPT,
                 user_message=user_prompt,
                 max_tokens=500,
+                agent_id="crew_composer",
             )
-            # Убираем кавычки если ответ обёрнут в них
             result = result.strip().strip('"').strip("'")
             return result
         except Exception as e:

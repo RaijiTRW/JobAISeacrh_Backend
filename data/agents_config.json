@@ -1,0 +1,9 @@
+{
+  "content_moderator": true,
+  "employer_moderator": true,
+  "crew_analyst": true,
+  "crew_strategist": true,
+  "crew_validator": true,
+  "crew_composer": true,
+  "support_chat": true
+}

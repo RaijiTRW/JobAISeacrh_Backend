@@ -6,10 +6,13 @@ from typing import List, Dict
 import httpx
 from config import get_settings
 from models.vacancy import Vacancy
+from agents.agents_config import is_agent_enabled, track_usage
 
 
 class ContentModerator:
     """Модератор контента с использованием AI"""
+
+    AGENT_ID = "content_moderator"
 
     def __init__(self):
         settings = get_settings()
@@ -23,15 +26,14 @@ class ContentModerator:
     ) -> Dict[str, List[Vacancy]]:
         """
         Проверка списка вакансий на запрещённый контент.
-
-        Returns:
-            {
-                "approved": [вакансии, прошедшие модерацию],
-                "rejected": [вакансии с запрещённым контентом]
-            }
         """
         if not vacancies:
             return {"approved": [], "rejected": []}
+
+        # Проверяем, включён ли агент
+        if not is_agent_enabled(self.AGENT_ID):
+            print(f"[ContentModerator] DISABLED - skipping moderation, approving all {len(vacancies)}")
+            return {"approved": vacancies, "rejected": []}
 
         # Подготовка данных для AI
         vacancies_data = []
@@ -61,10 +63,20 @@ class ContentModerator:
 
             if response.status_code != 200:
                 print(f"[ContentModerator] API error: {response.status_code}")
-                # При ошибке API - одобряем все (чтобы не потерять легитимные вакансии)
                 return {"approved": vacancies, "rejected": []}
 
             result = response.json()
+
+            # Трекинг токенов
+            usage = result.get("usage", {})
+            if usage:
+                track_usage(
+                    self.AGENT_ID,
+                    self.model,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                )
+
             content = result["choices"][0]["message"]["content"]
 
             # Парсим ответ AI

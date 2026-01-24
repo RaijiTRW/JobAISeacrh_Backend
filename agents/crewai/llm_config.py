@@ -16,12 +16,14 @@ class LLMClient:
         model: str = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        agent_id: str = None,
     ):
         self.settings = get_settings()
         self.model = model or self.settings.model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.base_url = self.settings.openrouter_base_url
+        self.agent_id = agent_id  # Для трекинга токенов
 
     async def chat(
         self,
@@ -30,19 +32,10 @@ class LLMClient:
         temperature: float = None,
         max_tokens: int = None,
         json_mode: bool = False,
+        agent_id: str = None,
     ) -> str:
         """
         Отправить сообщение в LLM и получить ответ.
-
-        Args:
-            system_prompt: Системный промпт
-            user_message: Сообщение пользователя
-            temperature: Переопределение температуры
-            max_tokens: Переопределение max_tokens
-            json_mode: Запросить JSON ответ
-
-        Returns:
-            Текстовый ответ от LLM
         """
         messages = [
             {"role": "system", "content": system_prompt},
@@ -54,6 +47,7 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=json_mode,
+            agent_id=agent_id,
         )
 
     async def chat_with_history(
@@ -63,19 +57,10 @@ class LLMClient:
         temperature: float = None,
         max_tokens: int = None,
         json_mode: bool = False,
+        agent_id: str = None,
     ) -> str:
         """
         Отправить сообщение с историей.
-
-        Args:
-            system_prompt: Системный промпт
-            messages: Список сообщений [{role, content}]
-            temperature: Переопределение температуры
-            max_tokens: Переопределение max_tokens
-            json_mode: Запросить JSON ответ
-
-        Returns:
-            Текстовый ответ от LLM
         """
         full_messages = [{"role": "system", "content": system_prompt}]
         full_messages.extend(messages)
@@ -85,6 +70,7 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=json_mode,
+            agent_id=agent_id,
         )
 
     async def _call(
@@ -93,6 +79,7 @@ class LLMClient:
         temperature: float = None,
         max_tokens: int = None,
         json_mode: bool = False,
+        agent_id: str = None,
     ) -> str:
         """Выполнить вызов API."""
         payload = {
@@ -123,6 +110,20 @@ class LLMClient:
                 raise Exception(f"LLM API error: {response.status_code}")
 
             data = response.json()
+
+            # Трекинг токенов
+            tracking_id = agent_id or self.agent_id
+            if tracking_id:
+                usage = data.get("usage", {})
+                input_tokens = usage.get("prompt_tokens", 0)
+                output_tokens = usage.get("completion_tokens", 0)
+                if input_tokens or output_tokens:
+                    try:
+                        from agents.agents_config import track_usage
+                        track_usage(tracking_id, self.model, input_tokens, output_tokens)
+                    except Exception as e:
+                        print(f"[LLM] Usage tracking error: {e}")
+
             return data["choices"][0]["message"]["content"]
 
 
