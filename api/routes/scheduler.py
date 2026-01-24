@@ -14,8 +14,9 @@ from scheduler.scheduler import (
     trigger_parsing_now,
     trigger_verification_now,
     trigger_old_parsing_now,
+    trigger_moderation_now,
 )
-from scheduler.jobs import run_avito_parsing, run_mass_parsing
+from scheduler.jobs import run_avito_parsing, run_mass_parsing, run_moderation
 
 
 router = APIRouter(prefix="/api/admin/scheduler", tags=["scheduler"])
@@ -83,13 +84,15 @@ async def require_admin(authorization: str) -> str:
 
 
 JOB_NAMES = {
-    "mass_parsing_job": "Парсинг ленты",  # Новый массовый парсинг
-    "parsing_job": "HH/SuperJob (старый)",  # Deprecated
-    "avito_job": "Avito (отключен)",  # Отключен
+    "mass_parsing_job": "Парсинг ленты",
+    "parsing_job": "HH/SuperJob (старый)",
+    "avito_job": "Avito (отключён)",
     "verification_job": "Верификация",
+    "moderation_job": "Content Moderation",
+    "volume_stats_job": "Volume Stats Recording",
 }
 
-VALID_JOB_IDS = ["mass_parsing_job", "parsing_job", "avito_job", "verification_job"]
+VALID_JOB_IDS = ["mass_parsing_job", "parsing_job", "avito_job", "verification_job", "moderation_job", "volume_stats_job"]
 
 
 # === Routes ===
@@ -176,16 +179,18 @@ async def trigger_job(job_id: str, authorization: str = Header(None)):
 
     try:
         if job_id == "mass_parsing_job":
-            # Новый массовый парсинг для ленты
             stats = await trigger_parsing_now()
         elif job_id == "parsing_job":
-            # Старый парсинг (deprecated)
             stats = await trigger_old_parsing_now()
         elif job_id == "avito_job":
-            # Avito отключен, но можем запустить вручную
             stats = await run_avito_parsing()
         elif job_id == "verification_job":
             stats = await trigger_verification_now()
+        elif job_id == "moderation_job":
+            stats = await run_moderation()
+        elif job_id == "volume_stats_job":
+            await scheduler_service.record_volume_stats()
+            stats = {"status": "completed"}
         else:
             raise HTTPException(status_code=400, detail="Invalid job ID")
 

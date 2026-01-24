@@ -38,7 +38,8 @@ class VacancyStorageService:
     def __init__(self):
         self.settings = get_settings()
         self.base_url = self.settings.supabase_url
-        self.api_key = self.settings.supabase_key
+        # Service role key needed for INSERT/UPDATE (RLS only has SELECT policy for anon)
+        self.api_key = self.settings.supabase_service_key or self.settings.supabase_key
         self.table = "vacancies_storage"
 
     def _headers(self) -> dict:

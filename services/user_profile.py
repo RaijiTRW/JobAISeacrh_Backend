@@ -60,7 +60,7 @@ class UserProfileService:
     def __init__(self):
         self.settings = get_settings()
         self.base_url = self.settings.supabase_url
-        self.api_key = self.settings.supabase_key
+        self.api_key = self.settings.supabase_service_key or self.settings.supabase_key
 
     async def get_user_data(self, user_id: str) -> UserData:
         """Получить профиль и резюме пользователя"""

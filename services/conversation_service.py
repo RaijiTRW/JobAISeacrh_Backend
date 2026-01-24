@@ -40,7 +40,7 @@ class ConversationService:
     def __init__(self):
         self.settings = get_settings()
         self.base_url = self.settings.supabase_url
-        self.api_key = self.settings.supabase_key
+        self.api_key = self.settings.supabase_service_key or self.settings.supabase_key
 
     def _headers(self, token: Optional[str] = None) -> dict:
         auth_token = token or self.api_key

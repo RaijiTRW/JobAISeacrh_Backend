@@ -22,7 +22,7 @@ class EmployerVacancyService:
     def __init__(self):
         self.settings = get_settings()
         self.base_url = self.settings.supabase_url
-        self.api_key = self.settings.supabase_key
+        self.api_key = self.settings.supabase_service_key or self.settings.supabase_key
         self.table = "employer_vacancies"
 
     def _headers(self, user_token: Optional[str] = None) -> dict:

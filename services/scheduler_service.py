@@ -14,7 +14,8 @@ class SchedulerService:
     def __init__(self):
         self.settings = get_settings()
         self.base_url = self.settings.supabase_url
-        self.api_key = self.settings.supabase_key
+        # RLS on scheduler tables requires service_role
+        self.api_key = self.settings.supabase_service_key or self.settings.supabase_key
 
     def _headers(self) -> dict:
         return {
