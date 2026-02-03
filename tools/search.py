@@ -264,6 +264,8 @@ class VacancySearchTool:
 
     def _process_results(self, vacancies: list[Vacancy], filters: SearchFilters) -> list[Vacancy]:
         """Дедупликация, балансировка и лимиты"""
+        print(f"[Search] _process_results: received {len(vacancies)} vacancies")
+
         # Исключаем вакансии по ID (для функции "Еще")
         if filters.exclude_vacancy_ids:
             exclude_set = set(filters.exclude_vacancy_ids)

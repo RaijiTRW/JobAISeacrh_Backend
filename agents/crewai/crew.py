@@ -474,16 +474,38 @@ class JobSearchCrew:
                 print(f"[AI] Starting live search with {len(queries[:5])} queries")
                 live_result = await vacancy_search.search(live_filters)
 
-                print(f"[AI] Live search complete. SearchResult type: {type(live_result)}, vacancies type: {type(live_result.vacancies)}")
-                print(f"[AI] live_result.vacancies length: {len(live_result.vacancies) if hasattr(live_result, 'vacancies') else 'N/A'}")
+                print(f"[AI] === LIVE SEARCH COMPLETE ===")
+                print(f"[AI] SearchResult type: {type(live_result)}")
+                print(f"[AI] SearchResult has vacancies: {hasattr(live_result, 'vacancies')}")
 
-                if live_result.vacancies:
-                    vacancies_list = list(live_result.vacancies)
-                    print(f"[AI] Live: {len(vacancies_list)} vacancies, sample sources: {[v.source for v in vacancies_list[:3]]}")
-                    yield vacancies_list  # Live результаты
-                    print(f"[AI] Live: {len(vacancies_list)} vacancies sent")
+                if hasattr(live_result, 'vacancies'):
+                    vacancies_field = live_result.vacancies
+                    print(f"[AI] vacancies field type: {type(vacancies_field)}")
+                    print(f"[AI] vacancies field length: {len(vacancies_field)}")
+                    print(f"[AI] vacancies field bool: {bool(vacancies_field)}")
+                    print(f"[AI] vacancies field is list: {isinstance(vacancies_field, list)}")
+
+                    # Try to access as list
+                    if isinstance(vacancies_field, list):
+                        print(f"[AI] Accessing as list, length: {len(vacancies_field)}")
+                        if vacancies_field:
+                            print(f"[AI] First vacancy type: {type(vacancies_field[0])}")
+                            print(f"[AI] Sample sources: {[v.source for v in vacancies_field[:3]]}")
+                    else:
+                        print(f"[AI] WARNING: vacancies is not a list, trying to convert")
+                        vacancies_field = list(vacancies_field)
+                        print(f"[AI] Converted to list, length: {len(vacancies_field)}")
+
+                    # Always try to yield, even if empty (for debugging)
+                    if vacancies_field:
+                        vacancies_list = list(vacancies_field) if not isinstance(vacancies_field, list) else vacancies_field
+                        print(f"[AI] Live: {len(vacancies_list)} vacancies, sample sources: {[v.source for v in vacancies_list[:3]]}")
+                        yield vacancies_list
+                        print(f"[AI] Live: {len(vacancies_list)} vacancies sent")
+                    else:
+                        print(f"[AI] Live: no vacancies to send (vacancies field is empty/falsy)")
                 else:
-                    print(f"[AI] Live: no vacancies found")
+                    print(f"[AI] Live: live_result has no vacancies attribute")
             except Exception as e:
                 print(f"[AI] Live search error: {e}")
                 import traceback
