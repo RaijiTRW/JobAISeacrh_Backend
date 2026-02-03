@@ -82,6 +82,13 @@ STRATEGIST_SYSTEM_PROMPT = """Ты - стратег поиска ваканси�
 1. Для каждой профессии генерируй 3-5 вариантов запроса (синонимы, вариации)
 2. Учитывай разговорные названия профессий
 3. Не дублируй запросы
+4. ВАЖНО: НЕ заменяй профессию на смежные профессии!
+
+ЗАПРЕЩЕНИЯ (категорически запрещённые замены):
+- Продавец → НЕ добавляй: мерчандайзер, кладовщик, склад, комплектовщик, фасовщик
+- Водитель → НЕ добавляй: курьер, экспедитор, логист (если не просили)
+- Менеджер → НЕ добавляй: мерчандайзер, администратор
+- Курьер → НЕ добавляй: водитель, экспедитор
 
 СЛОВАРЬ СИНОНИМОВ:
 - Продавец → продавец, продавец-консультант, продавец-кассир, менеджер торгового зала
@@ -427,10 +434,16 @@ class JobSearchCrew:
     async def _execute_search_stream(
         self,
         strategy: dict,
-        use_live_search: bool
+        use_live_search: bool,
+        params: dict = None
     ) -> AsyncIterator[list]:
         """
         Streaming поиск - yield вакансии по мере нахождения.
+
+        Args:
+            strategy: Стратегия поиска с queries
+            use_live_search: Использовать live поиск
+            params: Параметры поиска для валидации (professions, city, etc.)
 
         Yields:
             list: Чанк вакансий
@@ -474,13 +487,20 @@ class JobSearchCrew:
                         seen_ids.add(v.id)
                         unique_db.append(v)
 
-                print(f"[AI] DB: {len(unique_db)} vacancies found, streaming...")
-                # Стримим чанками по 10
+                print(f"[AI] DB: {len(unique_db)} vacancies found, streaming with validation...")
+
+                # Стримим чанками по 10 С ВАЛИДАЦИЕЙ
                 chunk_size = 10
                 for i in range(0, len(unique_db), chunk_size):
                     chunk = unique_db[i:i + chunk_size]
-                    yield chunk
-                print(f"[AI] DB: {len(unique_db)} vacancies sent")
+                    # Валидируем чанк перед отправкой
+                    validated_chunk = await self._validate_chunk(chunk, params)
+                    if validated_chunk:
+                        print(f"[AI] DB chunk {i//chunk_size + 1}: {len(chunk)} → {len(validated_chunk)} after validation")
+                        yield validated_chunk
+                    else:
+                        print(f"[AI] DB chunk {i//chunk_size + 1}: all filtered out")
+                print(f"[AI] DB: {len(unique_db)} vacancies processed")
         except Exception as e:
             print(f"[AI] DB search error: {e}")
             import traceback
@@ -532,14 +552,19 @@ class JobSearchCrew:
                 print(f"[AI] Live search complete: {len(all_vacancies)} vacancies found")
 
                 if all_vacancies:
-                    # Отправляем чанки по 10 вакансий для progressive loading
+                    # Отправляем чанки по 10 вакансий С ВАЛИДАЦИЕЙ
                     chunk_size = 10
                     for i in range(0, len(all_vacancies), chunk_size):
                         chunk = all_vacancies[i:i + chunk_size]
-                        print(f"[AI] Streaming chunk {i//chunk_size + 1}: {len(chunk)} vacancies")
-                        yield chunk
+                        # Валидируем чанк перед отправкой
+                        validated_chunk = await self._validate_chunk(chunk, params)
+                        if validated_chunk:
+                            print(f"[AI] Live chunk {i//chunk_size + 1}: {len(chunk)} → {len(validated_chunk)} after validation")
+                            yield validated_chunk
+                        else:
+                            print(f"[AI] Live chunk {i//chunk_size + 1}: all filtered out")
 
-                    print(f"[AI] Total {len(all_vacancies)} vacancies sent in chunks")
+                    print(f"[AI] Total {len(all_vacancies)} vacancies processed")
                 else:
                     print(f"[AI] No vacancies found to stream")
 
@@ -547,6 +572,93 @@ class JobSearchCrew:
                 print(f"[AI] Live search error: {e}")
                 import traceback
                 traceback.print_exc()
+
+    async def _validate_chunk(self, chunk: list, params: dict) -> list:
+        """
+        Быстрая LLM-валидация чанка вакансий.
+        Проверяет релевантность и возвращает только подходящие.
+        """
+        if not chunk or not params:
+            return chunk
+
+        professions = params.get("professions", [])
+
+        # Если агент валидатора отключен - возвращаем все
+        if not is_agent_enabled("crew_validator"):
+            return chunk
+
+        try:
+            # Формируем описание вакансий для валидатора
+            vacancy_summaries = []
+            for v in chunk:
+                title = getattr(v, 'title', '') or ''
+                company = getattr(v, 'company', '') or ''
+                city = getattr(v, 'city', '') or ''
+                salary = getattr(v, 'salary', '') or ''
+                vid = getattr(v, 'id', '') or ''
+                vacancy_summaries.append(
+                    f"ID:{vid} | {title} | {company} | {city} | {salary}"
+                )
+
+            vacancies_text = "\n".join(vacancy_summaries)
+            city = params.get("city", "")
+            salary_from = params.get("salary_from")
+
+            user_prompt = f"""ПАРАМЕТРЫ ПОИСКА:
+- Профессии: {', '.join(professions)}
+- Город: {city or 'любой'}
+- Зарплата от: {salary_from or 'любая'}
+
+ВАКАНСИИ ДЛЯ ПРОВЕРКИ:
+{vacancies_text}
+
+Проверь каждую вакансию и верни JSON с релевантными."""
+
+            result = await self.fast_llm.chat(
+                system_prompt=VALIDATOR_SYSTEM_PROMPT,
+                user_message=user_prompt,
+                json_mode=True,
+                max_tokens=2000,
+                agent_id="crew_validator",
+            )
+            validation = self._parse_json(result)
+
+            # Извлекаем ID прошедших валидацию
+            validated_ids = set()
+            for item in validation.get("validated", []):
+                vid = str(item.get("id", ""))
+                validated_ids.add(vid)
+
+            # Фильтруем чанк
+            validated = [v for v in chunk if str(getattr(v, 'id', '')) in validated_ids]
+
+            # Если ничего не прошло - пробуем альтернативное сопоставление ID
+            if not validated and validated_ids:
+                stripped_validated = set()
+                for vid in validated_ids:
+                    stripped_validated.add(vid)
+                    for prefix in ["hh_", "sj_", "avito_", "superjob_"]:
+                        if vid.startswith(prefix):
+                            stripped_validated.add(vid[len(prefix):])
+                        else:
+                            stripped_validated.add(f"{prefix}{vid}")
+
+                validated = [
+                    v for v in chunk
+                    if str(getattr(v, 'id', '')) in stripped_validated
+                    or str(getattr(v, 'id', '')).split('_', 1)[-1] in validated_ids
+                ]
+
+            # Если после фильтрации пусто - возвращаем оригинал (fallback)
+            if not validated:
+                print(f"[AI] Chunk validation: all filtered, returning original {len(chunk)}")
+                return chunk
+
+            return validated
+
+        except Exception as e:
+            print(f"[AI] Chunk validation error: {e}, returning original")
+            return chunk
 
     async def _validate_results(self, vacancies: list, params: dict) -> list:
         """Валидация вакансий через LLM."""
@@ -808,7 +920,7 @@ class JobSearchCrew:
         # Streaming поиск
         all_vacancies = []
         chunk_count = 0
-        async for vacancy_chunk in self._execute_search_stream(strategy, use_live_search):
+        async for vacancy_chunk in self._execute_search_stream(strategy, use_live_search, params):
             all_vacancies.extend(vacancy_chunk)
             chunk_count += 1
             print(f"[AI] Sending chunk {chunk_count} with {len(vacancy_chunk)} vacancies")
@@ -816,17 +928,13 @@ class JobSearchCrew:
 
         print(f"[AI] Total chunks sent: {chunk_count}, total vacancies: {len(all_vacancies)}")
 
-        # Пропускаем валидацию для streaming - vacancies уже показаны пользователю
-        validated_vacancies = all_vacancies
-        print(f"[AI] Skipping validation for streaming mode, using all {len(all_vacancies)} vacancies")
-
-        # Формируем финальный ответ
+        # Чанки уже валидированы при отправке, формируем финальный ответ
         response_text = await self._compose_response(
             request_type="SEARCH",
             context={
                 "parameters": params,
                 "total_found": len(all_vacancies),
-                "validated_count": len(validated_vacancies),
+                "validated_count": len(all_vacancies),
             },
             user_name=user_name,
         )
