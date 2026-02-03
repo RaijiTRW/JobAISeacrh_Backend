@@ -4,6 +4,7 @@
 ВАЖНО: SuperJob может блокировать запросы, парсер может работать нестабильно
 """
 
+import asyncio
 import httpx
 import re
 import ssl
@@ -65,7 +66,8 @@ class SuperJobParser(BaseParser):
 
             print(f"[SuperJob] Searching: {url} with params: {params}")
 
-            # Попытка 1: с verify=False
+            # Попытка 1: httpx с verify=False
+            response = None
             try:
                 limits = httpx.Limits(max_keepalive_connections=1, max_connections=1)
                 async with httpx.AsyncClient(
@@ -75,8 +77,10 @@ class SuperJobParser(BaseParser):
                     follow_redirects=True,
                 ) as client:
                     response = await client.get(url, params=params, headers=headers)
-            except (httpx.RemoteProtocolError, ssl.SSLError):
-                # Попытка 2: с отключенным SSL верификацией через контекст
+            except (httpx.RemoteProtocolError, ssl.SSLError) as e1:
+                print(f"[SuperJob] Attempt 1 failed: {type(e1).__name__}")
+
+                # Попытка 2: httpx с custom SSL context
                 try:
                     import ssl as ssl_module
                     ssl_context = ssl_module.create_default_context()
@@ -91,13 +95,56 @@ class SuperJobParser(BaseParser):
                         follow_redirects=True,
                     ) as client:
                         response = await client.get(url, params=params, headers=headers)
-                except Exception as e:
-                    # Если и вторая попытка failed - пропускаем SuperJob
-                    print(f"[SuperJob] SSL error after retry: {type(e).__name__}")
-                    return vacancies
+                    print(f"[SuperJob] Attempt 2 succeeded")
+                except Exception as e2:
+                    print(f"[SuperJob] Attempt 2 failed: {type(e2).__name__}")
+
+                    # Попытка 3: используем sync requests в async wrapper
+                    try:
+                        import requests
+                        from concurrent.futures import ThreadPoolExecutor
+                        import urllib3
+
+                        def make_request():
+                            # Отключаем предупреждения SSL
+                            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+                            session = requests.Session()
+                            session.verify = False
+                            session.headers.update(headers)
+
+                            resp = session.get(url, params=params, timeout=20, allow_redirects=True)
+                            return resp
+
+                        # Получаем текущий loop или создаём новый
+                        try:
+                            loop = asyncio.get_running_loop()
+                        except RuntimeError:
+                            loop = asyncio.get_event_loop()
+
+                        with ThreadPoolExecutor() as pool:
+                            resp = await loop.run_in_executor(pool, make_request)
+
+                        # Convert requests.Response to httpx-like response
+                        class HTTPXLikeResponse:
+                            def __init__(self, requests_resp):
+                                self._resp = requests_resp
+                                self.status_code = requests_resp.status_code
+                                self.text = requests_resp.text
+
+                            def raise_for_status(self):
+                                self._resp.raise_for_status()
+                                return self
+
+                        response = HTTPXLikeResponse(resp)
+                        print(f"[SuperJob] Attempt 3 (requests) succeeded with status {response.status_code}")
+
+                    except Exception as e3:
+                        print(f"[SuperJob] All attempts failed: {type(e3).__name__}")
+                        return vacancies
             except Exception as e:
-                # Другие ошибки
-                print(f"[SuperJob] Request error: {type(e).__name__}")
+                # Неожиданные ошибки (не SSL)
+                print(f"[SuperJob] Request error: {type(e).__name__}: {e}")
                 return vacancies
 
             print(f"[SuperJob] Response status: {response.status_code}")
