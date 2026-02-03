@@ -4,7 +4,7 @@ JobSearchCrew - мультиагентная система поиска раб�
 """
 import json
 import re
-from typing import Optional
+from typing import Optional, AsyncIterator
 from dataclasses import dataclass, field
 
 from .llm_config import get_main_llm, get_fast_llm
@@ -424,6 +424,61 @@ class JobSearchCrew:
 
         return all_vacancies
 
+    async def _execute_search_stream(
+        self,
+        strategy: dict,
+        use_live_search: bool
+    ) -> AsyncIterator[list]:
+        """
+        Streaming поиск - yield вакансии по мере нахождения.
+
+        Yields:
+            list: Чанк вакансий
+        """
+        queries = strategy.get("queries", [])
+        config = strategy.get("search_config", {})
+
+        if not queries:
+            return
+
+        city = config.get("city", "")
+        salary_from = config.get("salary_from")
+
+        # 1. Сначала ищем в БД быстро
+        try:
+            db_filters = SearchFilters(
+                queries=queries[:10],
+                city=city,
+                salary_from=salary_from,
+                search_in_feed=True,
+                search_online=False,
+            )
+            db_result = await vacancy_search.search(db_filters)
+
+            if db_result.vacancies:
+                yield list(db_result.vacancies)  # Первые результаты из БД
+                print(f"[AI] DB: {len(db_result.vacancies)} vacancies sent")
+        except Exception as e:
+            print(f"[AI] DB search error: {e}")
+
+        # 2. Потом live поиск - тоже чанками если возможно
+        if use_live_search:
+            try:
+                live_filters = SearchFilters(
+                    queries=queries[:5],
+                    city=city,
+                    salary_from=salary_from,
+                    search_in_feed=False,
+                    search_online=True,
+                )
+                live_result = await vacancy_search.search(live_filters)
+
+                if live_result.vacancies:
+                    yield list(live_result.vacancies)  # Live результаты
+                    print(f"[AI] Live: {len(live_result.vacancies)} vacancies sent")
+            except Exception as e:
+                print(f"[AI] Live search error: {e}")
+
     async def _validate_results(self, vacancies: list, params: dict) -> list:
         """Валидация вакансий через LLM."""
         if not vacancies:
@@ -620,6 +675,101 @@ class JobSearchCrew:
             return json.loads(text)
         except json.JSONDecodeError:
             return {}
+
+
+    async def process_message_stream(
+        self,
+        message: str,
+        conversation_history: list[dict] = None,
+        use_live_search: bool = True,
+    ) -> AsyncIterator[dict]:
+        """
+        Streaming обработка сообщения.
+
+        Yields:
+            dict: {'type': 'text'|'vacancies'|'done', 'content': ...}
+        """
+        history = conversation_history or []
+        context_summary = ""
+        if self.session:
+            context_summary = self.session.get_context_summary()
+
+        user_name = self.user_data.get("name") or self.user_data.get("first_name")
+
+        # Шаг 1: Анализ запроса
+        yield {'type': 'progress', 'message': 'Анализирую запрос...'}
+
+        analysis = await self._analyze_request(message, history, context_summary)
+        request_type = analysis.get("request_type", "CHAT")
+
+        # CLARIFICATION - сразу возвращаем
+        if request_type == "CLARIFICATION":
+            question = analysis.get("clarification_question", "")
+            response_text = await self._compose_response(
+                request_type="CLARIFICATION",
+                context={
+                    "parameters": analysis.get("parameters", {}),
+                    "question": question,
+                },
+                user_name=user_name,
+            )
+            yield {'type': 'text', 'content': response_text}
+            yield {'type': 'done'}
+            return
+
+        # CHAT/PROFILE - сразу возвращаем
+        if request_type in ("CHAT", "PROFILE"):
+            response_text = await self._compose_response(
+                request_type=request_type,
+                context={"message": message},
+                user_name=user_name,
+            )
+            yield {'type': 'text', 'content': response_text}
+            yield {'type': 'done'}
+            return
+
+        # SEARCH - streaming вакансий
+        params = analysis.get("parameters", {})
+
+        yield {'type': 'progress', 'message': 'Создаю стратегию поиска...'}
+        strategy = await self._create_strategy(params)
+
+        yield {'type': 'progress', 'message': 'Ищу вакансии...'}
+
+        # Streaming поиск
+        all_vacancies = []
+        async for vacancy_chunk in self._execute_search_stream(strategy, use_live_search):
+            all_vacancies.extend(vacancy_chunk)
+            yield {'type': 'vacancies_chunk', 'content': vacancy_chunk}
+
+        # Валидация (опционально, можно пропускать для скорости)
+        validated_vacancies = all_vacancies
+        if all_vacancies:
+            yield {'type': 'progress', 'message': 'Проверяю результаты...'}
+            validated_vacancies = await self._validate_results(all_vacancies, params)
+
+        # Формируем финальный ответ
+        response_text = await self._compose_response(
+            request_type="SEARCH",
+            context={
+                "parameters": params,
+                "total_found": len(all_vacancies),
+                "validated_count": len(validated_vacancies),
+            },
+            user_name=user_name,
+        )
+
+        yield {'type': 'text', 'content': response_text}
+        yield {'type': 'done'}
+
+        # Обновляем сессию
+        if self.session:
+            if params.get("city"):
+                self.session.update_preferences(city=params["city"])
+            if params.get("professions"):
+                self.session.update_preferences(query=", ".join(params["professions"]))
+            if params.get("salary_from"):
+                self.session.update_preferences(salary_from=params["salary_from"])
 
 
 async def process_chat_message(

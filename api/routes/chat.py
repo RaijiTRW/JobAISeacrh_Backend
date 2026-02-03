@@ -139,10 +139,10 @@ async def send_message_stream(request: ChatMessageRequest):
     session.add_message("user", request.message)
 
     async def generate():
-        """Генератор для SSE с CrewAI"""
+        """Генератор для SSE с CrewAI - streaming вакансий по мере нахождения"""
 
         # Отправляем начальный статус
-        yield f"data: {json.dumps({'type': 'progress', 'message': 'Анализирую запрос...'})}\n\n"
+        yield f"data: {json.dumps({'type': 'progress', 'message': 'starting'})}\n\n"
 
         # Запускаем CrewAI
         crew = JobSearchCrew(
@@ -152,40 +152,42 @@ async def send_message_stream(request: ChatMessageRequest):
         )
 
         try:
-            result = await crew.process_message(
+            # Используем streaming variant
+            response_text_accumulated = ""
+
+            async for event in crew.process_message_stream(
                 message=request.message,
                 conversation_history=session.get_recent_history(limit=10),
                 use_live_search=use_live_search,
-            )
+            ):
+                if event['type'] == 'text':
+                    # Стримим текст по словам
+                    words = event['content'].split()
+                    for word in words:
+                        yield f"data: {json.dumps({'type': 'text', 'content': word + ' '})}\n\n"
+                        await asyncio.sleep(0.02)
+                    response_text_accumulated = event['content']
 
-            # Стримим текстовый ответ по словам
-            words = result.response_text.split()
-            for word in words:
-                yield f"data: {json.dumps({'type': 'text', 'content': word + ' '})}\n\n"
-                await asyncio.sleep(0.02)
+                elif event['type'] == 'vacancies_chunk':
+                    # Отправляем чанк вакансий сразу
+                    vacancies_json = []
+                    for v in event['content']:
+                        if hasattr(v, 'model_dump'):
+                            vacancies_json.append(v.model_dump(mode='json'))
+                        elif isinstance(v, dict):
+                            vacancies_json.append(v)
 
-            # Отправляем вакансии если есть
-            if result.vacancies and result.show_vacancies:
-                vacancies_json = []
-                for v in result.vacancies:
-                    if hasattr(v, 'model_dump'):
-                        vacancies_json.append(v.model_dump(mode='json'))
-                    elif isinstance(v, dict):
-                        vacancies_json.append(v)
+                    yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': vacancies_json}, default=json_serializer)}\n\n"
 
-                # Отправляем вакансии чанками для progressive loading
-                chunk_size = 10
-                for i in range(0, len(vacancies_json), chunk_size):
-                    chunk = vacancies_json[i:i+chunk_size]
-                    source = "database" if i == 0 else "search"
-                    yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': chunk, 'source': source}, default=json_serializer)}\n\n"
-                    await asyncio.sleep(0.05)
+                elif event['type'] == 'progress':
+                    # Прогресс можно логировать, но не отправляем клиенту
+                    print(f"[Chat Stream] Progress: {event.get('message', '')}")
 
-            # Сохраняем в историю
-            session.add_message("assistant", result.response_text)
-
-            # Завершение
-            yield f"data: {json.dumps({'type': 'done', 'chat_id': session.id})}\n\n"
+                elif event['type'] == 'done':
+                    # Сохраняем в историю
+                    if response_text_accumulated:
+                        session.add_message("assistant", response_text_accumulated)
+                    yield f"data: {json.dumps({'type': 'done', 'chat_id': session.id})}\n\n"
 
         except Exception as e:
             print(f"[Chat Stream] Error: {e}")
