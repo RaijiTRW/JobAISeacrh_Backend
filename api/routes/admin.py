@@ -38,6 +38,10 @@ class RoleRequest(BaseModel):
     role: str
 
 
+class AddRequestsRequest(BaseModel):
+    amount: int
+
+
 class StatsResponse(BaseModel):
     total_users: int
     online_users: int
@@ -195,6 +199,39 @@ async def set_user_role(
         raise HTTPException(status_code=500, detail="Failed to update role")
 
     return {"success": True, "role": request.role}
+
+
+@router.post("/users/{user_id}/reset-daily")
+async def reset_user_daily_usage(
+    user_id: str,
+    authorization: str = Header(None),
+):
+    """Сбросить использованные сегодня запросы (daily_used = 0)"""
+    await require_admin(authorization)
+
+    success = await admin_service.reset_daily_usage(user_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to reset daily usage")
+
+    return {"success": True}
+
+
+@router.post("/users/{user_id}/requests")
+async def add_user_requests(
+    user_id: str,
+    request: AddRequestsRequest,
+    authorization: str = Header(None),
+):
+    """Добавить/убавить бонусные запросы пользователю"""
+    await require_admin(authorization)
+
+    from services.subscription_service import subscription_service
+
+    success = await subscription_service.add_bonus_requests(user_id, request.amount)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update bonus requests")
+
+    return {"success": True, "new_bonus": request.amount}
 
 
 # === Site Settings ===

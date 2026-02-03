@@ -450,6 +450,28 @@ class AdminService:
         except Exception:
             return False
 
+    async def reset_daily_usage(self, user_id: str) -> bool:
+        """Сбросить daily_used = 0 для пользователя"""
+        try:
+            async with httpx.AsyncClient() as client:
+                # Обновляем daily_used в user_request_limits
+                response = await client.patch(
+                    f"{self.base_url}/rest/v1/user_request_limits",
+                    params={"user_id": f"eq.{user_id}"},
+                    headers=self._headers(),
+                    json={
+                        "daily_used": 0,
+                        "daily_reset_at": datetime.utcnow().strftime("%Y-%m-%d"),
+                        "updated_at": datetime.utcnow().isoformat(),
+                    },
+                    timeout=10.0,
+                )
+                print(f"[Admin] reset_daily_usage for {user_id}: {response.status_code}")
+                return response.status_code in (200, 201, 204)
+        except Exception as e:
+            print(f"[Admin] reset_daily_usage error: {e}")
+            return False
+
 
 # Singleton
 admin_service = AdminService()

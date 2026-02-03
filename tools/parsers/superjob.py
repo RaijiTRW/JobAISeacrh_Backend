@@ -65,83 +65,92 @@ class SuperJobParser(BaseParser):
 
             print(f"[SuperJob] Searching: {url} with params: {params}")
 
-            # Используем специальные параметры для SSL ошибок SuperJob
-            limits = httpx.Limits(max_keepalive_connections=1, max_connections=1)
-            async with httpx.AsyncClient(
-                verify=False,
-                timeout=20.0,
-                limits=limits,
-                follow_redirects=True,
-            ) as client:
+            # Попытка 1: с verify=False
+            try:
+                limits = httpx.Limits(max_keepalive_connections=1, max_connections=1)
+                async with httpx.AsyncClient(
+                    verify=False,
+                    timeout=20.0,
+                    limits=limits,
+                    follow_redirects=True,
+                ) as client:
+                    response = await client.get(url, params=params, headers=headers)
+            except (httpx.RemoteProtocolError, ssl.SSLError):
+                # Попытка 2: с отключенным SSL верификацией через контекст
                 try:
-                    response = await client.get(
-                        url,
-                        params=params,
-                        headers=headers,
-                    )
-                except (httpx.RemoteProtocolError, ssl.SSLError) as ssl_err:
-                    # SSL ошибки - возвращаем пустой список без traceback
-                    print(f"[SuperJob] SSL error (skipped): {type(ssl_err).__name__}")
+                    import ssl as ssl_module
+                    ssl_context = ssl_module.create_default_context()
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl_module.CERT_NONE
+
+                    limits = httpx.Limits(max_keepalive_connections=1, max_connections=1)
+                    async with httpx.AsyncClient(
+                        verify=ssl_context,
+                        timeout=20.0,
+                        limits=limits,
+                        follow_redirects=True,
+                    ) as client:
+                        response = await client.get(url, params=params, headers=headers)
+                except Exception as e:
+                    # Если и вторая попытка failed - пропускаем SuperJob
+                    print(f"[SuperJob] SSL error after retry: {type(e).__name__}")
                     return vacancies
+            except Exception as e:
+                # Другие ошибки
+                print(f"[SuperJob] Request error: {type(e).__name__}")
+                return vacancies
 
-                print(f"[SuperJob] Response status: {response.status_code}")
+            print(f"[SuperJob] Response status: {response.status_code}")
 
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, "html.parser")
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
 
-                    # SuperJob использует разные классы, пробуем несколько селекторов
-                    items = []
+                # SuperJob использует разные классы, пробуем несколько селекторов
+                items = []
 
-                    # Основной селектор
-                    items = soup.select("[class*='f-test-vacancy-item']")
-                    print(f"[SuperJob] Found {len(items)} items with f-test-vacancy-item")
+                # Основной селектор
+                items = soup.select("[class*='f-test-vacancy-item']")
+                print(f"[SuperJob] Found {len(items)} items with f-test-vacancy-item")
 
-                    # Альтернативные селекторы
-                    if not items:
-                        items = soup.select("[class*='VacancyItem']")
-                        print(f"[SuperJob] Found {len(items)} items with VacancyItem")
+                # Альтернативные селекторы
+                if not items:
+                    items = soup.select("[class*='VacancyItem']")
+                    print(f"[SuperJob] Found {len(items)} items with VacancyItem")
 
-                    if not items:
-                        items = soup.select("[class*='_vacancy']")
-                        print(f"[SuperJob] Found {len(items)} items with _vacancy")
+                if not items:
+                    items = soup.select("[class*='_vacancy']")
+                    print(f"[SuperJob] Found {len(items)} items with _vacancy")
 
-                    if not items:
-                        # Пробуем найти по ссылкам на вакансии
-                        vacancy_links = soup.select("a[href*='/vakansii/'][href$='.html']")
-                        print(f"[SuperJob] Found {len(vacancy_links)} vacancy links")
-                        # Получаем родительские контейнеры
-                        seen_parents = set()
-                        for link in vacancy_links:
-                            parent = link.find_parent("div", recursive=True)
-                            if parent and id(parent) not in seen_parents:
-                                seen_parents.add(id(parent))
-                                items.append(parent)
+                if not items:
+                    # Пробуем найти по ссылкам на вакансии
+                    vacancy_links = soup.select("a[href*='/vakansii/'][href$='.html']")
+                    print(f"[SuperJob] Found {len(vacancy_links)} vacancy links")
+                    # Получаем родительские контейнеры
+                    seen_parents = set()
+                    for link in vacancy_links:
+                        parent = link.find_parent("div", recursive=True)
+                        if parent and id(parent) not in seen_parents:
+                            seen_parents.add(id(parent))
+                            items.append(parent)
 
-                    items = items[:limit]
+                items = items[:limit]
 
-                    for item in items:
-                        vacancy = self._parse_vacancy(item, filters.city or "Россия")
-                        if vacancy and self.matches_filters(vacancy, filters):
-                            vacancies.append(vacancy)
+                for item in items:
+                    vacancy = self._parse_vacancy(item, filters.city or "Россия")
+                    if vacancy and self.matches_filters(vacancy, filters):
+                        vacancies.append(vacancy)
 
-                elif response.status_code == 403:
-                    print("[SuperJob] Access denied (403) - SuperJob blocked the request")
-                elif response.status_code == 429:
-                    print("[SuperJob] Rate limited (429) - too many requests")
-                else:
-                    print(f"[SuperJob] Unexpected status: {response.status_code}")
+            elif response.status_code == 403:
+                print("[SuperJob] Access denied (403) - SuperJob blocked the request")
+            elif response.status_code == 429:
+                print("[SuperJob] Rate limited (429) - too many requests")
+            else:
+                print(f"[SuperJob] Unexpected status: {response.status_code}")
 
         except httpx.TimeoutException:
             print("[SuperJob] Request timeout")
-        except (httpx.RemoteProtocolError, ssl.SSLError) as ssl_err:
-            # SSL ошибки - тихо пропускаем без traceback
-            print(f"[SuperJob] SSL error: {type(ssl_err).__name__}")
         except Exception as e:
             print(f"[SuperJob] Parser error: {e}")
-            # traceback только для отладки других ошибок
-            if "SSL" not in str(e) and "DECRYPTION" not in str(e):
-                import traceback
-                traceback.print_exc()
 
         print(f"[SuperJob] Total vacancies found: {len(vacancies)}")
         return vacancies
