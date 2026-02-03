@@ -177,7 +177,9 @@ async def send_message_stream(request: ChatMessageRequest):
                         elif isinstance(v, dict):
                             vacancies_json.append(v)
 
+                    print(f"[Chat Stream] Sending vacancies_chunk with {len(vacancies_json)} vacancies")
                     yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': vacancies_json}, default=json_serializer)}\n\n"
+                    print(f"[Chat Stream] vacancies_chunk sent successfully")
 
                 elif event['type'] == 'progress':
                     # Прогресс можно логировать, но не отправляем клиенту

@@ -461,7 +461,7 @@ class JobSearchCrew:
         except Exception as e:
             print(f"[AI] DB search error: {e}")
 
-        # 2. Потом live поиск - тоже чанками если возможно
+        # 2. Потом live поиск - отправляем по мере получения от каждого источника
         if use_live_search:
             try:
                 live_filters = SearchFilters(
@@ -474,10 +474,15 @@ class JobSearchCrew:
                 live_result = await vacancy_search.search(live_filters)
 
                 if live_result.vacancies:
-                    yield list(live_result.vacancies)  # Live результаты
-                    print(f"[AI] Live: {len(live_result.vacancies)} vacancies sent")
+                    vacancies_list = list(live_result.vacancies)
+                    yield vacancies_list  # Live результаты
+                    print(f"[AI] Live: {len(vacancies_list)} vacancies sent")
+                else:
+                    print(f"[AI] Live: no vacancies found")
             except Exception as e:
                 print(f"[AI] Live search error: {e}")
+                import traceback
+                traceback.print_exc()
 
     async def _validate_results(self, vacancies: list, params: dict) -> list:
         """Валидация вакансий через LLM."""
@@ -738,15 +743,24 @@ class JobSearchCrew:
 
         # Streaming поиск
         all_vacancies = []
+        chunk_count = 0
         async for vacancy_chunk in self._execute_search_stream(strategy, use_live_search):
             all_vacancies.extend(vacancy_chunk)
+            chunk_count += 1
+            print(f"[AI] Sending chunk {chunk_count} with {len(vacancy_chunk)} vacancies")
             yield {'type': 'vacancies_chunk', 'content': vacancy_chunk}
+
+        print(f"[AI] Total chunks sent: {chunk_count}, total vacancies: {len(all_vacancies)}")
 
         # Валидация (опционально, можно пропускать для скорости)
         validated_vacancies = all_vacancies
         if all_vacancies:
+            print(f"[AI] Starting validation of {len(all_vacancies)} vacancies...")
             yield {'type': 'progress', 'message': 'Проверяю результаты...'}
             validated_vacancies = await self._validate_results(all_vacancies, params)
+            print(f"[AI] Validation complete: {len(validated_vacancies)} vacancies accepted")
+        else:
+            print(f"[AI] No vacancies to validate")
 
         # Формируем финальный ответ
         response_text = await self._compose_response(
