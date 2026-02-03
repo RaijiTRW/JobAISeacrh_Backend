@@ -6,6 +6,7 @@
 
 import httpx
 import re
+import ssl
 from typing import Optional
 from bs4 import BeautifulSoup
 from tools.parsers import BaseParser
@@ -64,14 +65,24 @@ class SuperJobParser(BaseParser):
 
             print(f"[SuperJob] Searching: {url} with params: {params}")
 
-            async with httpx.AsyncClient(verify=False) as client:
-                response = await client.get(
-                    url,
-                    params=params,
-                    headers=headers,
-                    timeout=20.0,
-                    follow_redirects=True,
-                )
+            # Используем специальные параметры для SSL ошибок SuperJob
+            limits = httpx.Limits(max_keepalive_connections=1, max_connections=1)
+            async with httpx.AsyncClient(
+                verify=False,
+                timeout=20.0,
+                limits=limits,
+                follow_redirects=True,
+            ) as client:
+                try:
+                    response = await client.get(
+                        url,
+                        params=params,
+                        headers=headers,
+                    )
+                except (httpx.RemoteProtocolError, ssl.SSLError) as ssl_err:
+                    # SSL ошибки - возвращаем пустой список без traceback
+                    print(f"[SuperJob] SSL error (skipped): {type(ssl_err).__name__}")
+                    return vacancies
 
                 print(f"[SuperJob] Response status: {response.status_code}")
 
@@ -122,10 +133,15 @@ class SuperJobParser(BaseParser):
 
         except httpx.TimeoutException:
             print("[SuperJob] Request timeout")
+        except (httpx.RemoteProtocolError, ssl.SSLError) as ssl_err:
+            # SSL ошибки - тихо пропускаем без traceback
+            print(f"[SuperJob] SSL error: {type(ssl_err).__name__}")
         except Exception as e:
             print(f"[SuperJob] Parser error: {e}")
-            import traceback
-            traceback.print_exc()
+            # traceback только для отладки других ошибок
+            if "SSL" not in str(e) and "DECRYPTION" not in str(e):
+                import traceback
+                traceback.print_exc()
 
         print(f"[SuperJob] Total vacancies found: {len(vacancies)}")
         return vacancies
