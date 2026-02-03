@@ -471,10 +471,15 @@ class JobSearchCrew:
                     search_in_feed=False,
                     search_online=True,
                 )
+                print(f"[AI] Starting live search with {len(queries[:5])} queries")
                 live_result = await vacancy_search.search(live_filters)
+
+                print(f"[AI] Live search complete. SearchResult type: {type(live_result)}, vacancies type: {type(live_result.vacancies)}")
+                print(f"[AI] live_result.vacancies length: {len(live_result.vacancies) if hasattr(live_result, 'vacancies') else 'N/A'}")
 
                 if live_result.vacancies:
                     vacancies_list = list(live_result.vacancies)
+                    print(f"[AI] Live: {len(vacancies_list)} vacancies, sample sources: {[v.source for v in vacancies_list[:3]]}")
                     yield vacancies_list  # Live результаты
                     print(f"[AI] Live: {len(vacancies_list)} vacancies sent")
                 else:

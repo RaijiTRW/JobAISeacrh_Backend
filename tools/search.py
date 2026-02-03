@@ -290,12 +290,30 @@ class VacancySearchTool:
         unique_vacancies = self._semantic_dedupe(unique_vacancies)
         print(f"[Search] After semantic dedupe: {len(unique_vacancies)}")
 
+        # Debug: check source values
+        if unique_vacancies:
+            sources_set = set(v.source for v in unique_vacancies)
+            print(f"[Search] Unique sources found: {sources_set}")
+
         # Балансируем источники (берём больше с каждого)
         max_per_source = self.settings.max_total_vacancies // 2
         by_source = {"hh": [], "avito": [], "superjob": []}
         for v in unique_vacancies:
-            if v.source in by_source:
+            # Нормализуем source для проверки (hh.ru -> hh, superjob -> superjob)
+            source_normalized = v.source.lower().replace(".ru", "").replace(".", "").replace("_", "")
+            # hh_ или hh.ru -> hh
+            if "hh" in source_normalized:
+                by_source["hh"].append(v)
+            elif "avito" in source_normalized:
+                by_source["avito"].append(v)
+            elif "superjob" in source_normalized or "sj" in source_normalized:
+                by_source["superjob"].append(v)
+            elif v.source in by_source:
                 by_source[v.source].append(v)
+            else:
+                # Неизвестный source - добавляем в hh для сохранения вакансии
+                print(f"[Search] Unknown source '{v.source}', adding to hh bucket")
+                by_source["hh"].append(v)
 
         # Сортируем каждый источник по зарплате
         for source in by_source:
@@ -326,12 +344,15 @@ class VacancySearchTool:
         "Оператор ПВЗ" ≈ "Менеджер пункта выдачи" ≈ "Сотрудник ПВЗ"
         Оставляем лучшую из группы (выше зарплата, лучше описание).
         """
+        print(f"[Search] _semantic_dedupe: received {len(vacancies)} vacancies")
+
         if len(vacancies) <= 1:
+            print(f"[Search] _semantic_dedupe: too few vacancies, skipping")
             return vacancies
 
         # Нормализация названия для сравнения
         def normalize(title: str) -> str:
-            t = title.lower().strip()
+            t = str(title).lower().strip() if title else ""
             # Убираем стоп-слова которые не влияют на смысл
             for word in ["требуется", "нужен", "нужна", "ищем", "вакансия", "работа"]:
                 t = t.replace(word, "")
@@ -360,15 +381,33 @@ class VacancySearchTool:
 
             # Извлекаем ключевые слова (первые 3 значимых слова)
             words = [w for w in t.split() if len(w) > 2][:3]
-            return " ".join(sorted(words))
+
+            # Фолбэк: если слов мало, используем все слова длиной > 1
+            if not words:
+                words = [w for w in t.split() if len(w) > 1][:3]
+
+            key = " ".join(sorted(words))
+
+            # Последний фолбэк: используем первые 3 символа заголовка
+            if not key:
+                key = title[:3].lower() if title else "_empty_"
+
+            return key
 
         # Группируем по базовому ключу + город
         groups: dict[str, list[Vacancy]] = {}
         for v in vacancies:
-            key = f"{get_base_key(v.title)}_{v.city.lower()}"
+            title_key = get_base_key(v.title)
+            city_key = str(v.city).lower() if v.city else "_unknown_"
+            key = f"{title_key}_{city_key}"
             if key not in groups:
                 groups[key] = []
             groups[key].append(v)
+
+        print(f"[Search] _semantic_dedupe: created {len(groups)} groups from {len(vacancies)} vacancies")
+        if len(groups) < 10:
+            for key, group in list(groups.items())[:5]:
+                print(f"[Search]   Group '{key[:40]}': {len(group)} vacancies")
 
         # Из каждой группы берём лучшую вакансию
         result = []
@@ -393,6 +432,7 @@ class VacancySearchTool:
                 if len(group) > 1:
                     print(f"[Search] Dedupe group '{key[:30]}': {len(group)} → 1 (kept: {best.title[:40]})")
 
+        print(f"[Search] _semantic_dedupe: returning {len(result)} vacancies")
         return result
 
     def get_tool_definition(self) -> dict:
