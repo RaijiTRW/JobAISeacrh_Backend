@@ -444,68 +444,105 @@ class JobSearchCrew:
         city = config.get("city", "")
         salary_from = config.get("salary_from")
 
-        # 1. Сначала ищем в БД быстро
+        # 1. Сначала ищем в БД быстро - СТРИМИМ СРАЗУ без фильтрации
         try:
-            db_filters = SearchFilters(
-                queries=queries[:10],
-                city=city,
-                salary_from=salary_from,
-                search_in_feed=True,
-                search_online=False,
-            )
-            db_result = await vacancy_search.search(db_filters)
+            from services.vacancy_storage import vacancy_storage_service
 
-            if db_result.vacancies:
-                yield list(db_result.vacancies)  # Первые результаты из БД
-                print(f"[AI] DB: {len(db_result.vacancies)} vacancies sent")
+            all_db_vacancies = []
+            for query in queries[:10]:
+                try:
+                    stored, _ = await vacancy_storage_service.search_vacancies(
+                        query=query,
+                        city=city,
+                        salary_from=salary_from,
+                        limit=50,
+                        offset=0,
+                    )
+                    # Конвертируем и добавляем сразу
+                    for sv in stored:
+                        vacancy = vacancy_storage_service.to_vacancy(sv)
+                        all_db_vacancies.append(vacancy)
+                except Exception as e:
+                    print(f"[AI] DB search error for '{query}': {e}")
+
+            if all_db_vacancies:
+                # Дедупликация только по ID
+                seen_ids = set()
+                unique_db = []
+                for v in all_db_vacancies:
+                    if v.id not in seen_ids:
+                        seen_ids.add(v.id)
+                        unique_db.append(v)
+
+                print(f"[AI] DB: {len(unique_db)} vacancies found, streaming...")
+                # Стримим чанками по 10
+                chunk_size = 10
+                for i in range(0, len(unique_db), chunk_size):
+                    chunk = unique_db[i:i + chunk_size]
+                    yield chunk
+                print(f"[AI] DB: {len(unique_db)} vacancies sent")
         except Exception as e:
             print(f"[AI] DB search error: {e}")
+            import traceback
+            traceback.print_exc()
 
-        # 2. Потом live поиск - отправляем по мере получения от каждого источника
+        # 2. Потом live поиск - стримим СРАЗУ после _search_live, минуя _process_results
         if use_live_search:
             try:
-                live_filters = SearchFilters(
-                    queries=queries[:5],
-                    city=city,
-                    salary_from=salary_from,
-                    search_in_feed=False,
-                    search_online=True,
-                )
-                print(f"[AI] Starting live search with {len(queries[:5])} queries")
-                live_result = await vacancy_search.search(live_filters)
+                from tools.parsers.hh import HHParser
+                from tools.parsers.superjob import SuperJobParser
 
-                print(f"[AI] === LIVE SEARCH COMPLETE ===")
-                print(f"[AI] SearchResult type: {type(live_result)}")
-                print(f"[AI] SearchResult has vacancies: {hasattr(live_result, 'vacancies')}")
+                hh_parser = HHParser()
+                sj_parser = SuperJobParser()
 
-                if hasattr(live_result, 'vacancies'):
-                    vacancies_field = live_result.vacancies
-                    print(f"[AI] vacancies field type: {type(vacancies_field)}")
-                    print(f"[AI] vacancies field length: {len(vacancies_field)}")
-                    print(f"[AI] vacancies field bool: {bool(vacancies_field)}")
-                    print(f"[AI] vacancies field is list: {isinstance(vacancies_field, list)}")
+                queries_to_search = queries[:5]
 
-                    # Try to access as list
-                    if isinstance(vacancies_field, list):
-                        print(f"[AI] Accessing as list, length: {len(vacancies_field)}")
-                        if vacancies_field:
-                            print(f"[AI] First vacancy type: {type(vacancies_field[0])}")
-                            print(f"[AI] Sample sources: {[v.source for v in vacancies_field[:3]]}")
-                    else:
-                        print(f"[AI] WARNING: vacancies is not a list, trying to convert")
-                        vacancies_field = list(vacancies_field)
-                        print(f"[AI] Converted to list, length: {len(vacancies_field)}")
+                print(f"[AI] Starting live search with {len(queries_to_search)} queries")
 
-                    # Always try to yield, even if empty (for debugging)
-                    if vacancies_field:
-                        vacancies_list = list(vacancies_field) if not isinstance(vacancies_field, list) else vacancies_field
-                        print(f"[AI] Live: {len(vacancies_list)} vacancies, sample sources: {[v.source for v in vacancies_list[:3]]}")
-                        yield vacancies_list
-                        print(f"[AI] Live: {len(vacancies_list)} vacancies sent")
-                    else:
-                        print(f"[AI] Live: no vacancies to send (vacancies field is empty/falsy)")
+                # Запускаем HH и SuperJob параллельно, но без Avito (он может зависать)
+                parallel_tasks = []
+                for query in queries_to_search:
+                    single_filter = SearchFilters(
+                        query=query,
+                        city=city,
+                        salary_from=salary_from,
+                    )
+                    # HH
+                    parallel_tasks.append(hh_parser.search(single_filter, limit=20))
+                    # SuperJob (может падать от SSL ошибок, но пробуем)
+                    try:
+                        parallel_tasks.append(sj_parser.search(single_filter, limit=20))
+                    except:
+                        pass  # SuperJob может не работать
+
+                print(f"[AI] Running {len(parallel_tasks)} parallel search tasks")
+
+                # Собираем результаты
+                import asyncio
+                results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+
+                all_vacancies = []
+                for result in results:
+                    if isinstance(result, list):
+                        all_vacancies.extend(result)
+                        print(f"[AI] Got {len(result)} vacancies from task")
+                    elif isinstance(result, Exception):
+                        print(f"[AI] Search task error: {result}")
+
+                print(f"[AI] Live search complete: {len(all_vacancies)} vacancies found")
+
+                if all_vacancies:
+                    # Отправляем чанки по 10 вакансий для progressive loading
+                    chunk_size = 10
+                    for i in range(0, len(all_vacancies), chunk_size):
+                        chunk = all_vacancies[i:i + chunk_size]
+                        print(f"[AI] Streaming chunk {i//chunk_size + 1}: {len(chunk)} vacancies")
+                        yield chunk
+
+                    print(f"[AI] Total {len(all_vacancies)} vacancies sent in chunks")
                 else:
-                    print(f"[AI] Live: live_result has no vacancies attribute")
+                    print(f"[AI] No vacancies found to stream")
+
             except Exception as e:
                 print(f"[AI] Live search error: {e}")
                 import traceback
@@ -779,15 +816,9 @@ class JobSearchCrew:
 
         print(f"[AI] Total chunks sent: {chunk_count}, total vacancies: {len(all_vacancies)}")
 
-        # Валидация (опционально, можно пропускать для скорости)
+        # Пропускаем валидацию для streaming - vacancies уже показаны пользователю
         validated_vacancies = all_vacancies
-        if all_vacancies:
-            print(f"[AI] Starting validation of {len(all_vacancies)} vacancies...")
-            yield {'type': 'progress', 'message': 'Проверяю результаты...'}
-            validated_vacancies = await self._validate_results(all_vacancies, params)
-            print(f"[AI] Validation complete: {len(validated_vacancies)} vacancies accepted")
-        else:
-            print(f"[AI] No vacancies to validate")
+        print(f"[AI] Skipping validation for streaming mode, using all {len(all_vacancies)} vacancies")
 
         # Формируем финальный ответ
         response_text = await self._compose_response(
