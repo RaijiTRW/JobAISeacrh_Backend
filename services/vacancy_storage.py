@@ -246,6 +246,7 @@ class VacancyStorageService:
         city: Optional[str] = None,
         salary_from: Optional[int] = None,
         experience: Optional[str] = None,
+        employment_type: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[StoredVacancy], int]:
@@ -309,6 +310,13 @@ class VacancyStorageService:
                         vacancies = [
                             v for v in vacancies
                             if self._matches_experience(v.experience, exp_patterns)
+                        ]
+
+                    # Фильтруем по типу занятости (удаленка и т.д.)
+                    if employment_type:
+                        vacancies = [
+                            v for v in vacancies
+                            if v.employment_type == employment_type
                         ]
 
                     total = len(vacancies)

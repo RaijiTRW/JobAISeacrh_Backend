@@ -42,12 +42,12 @@ class Settings(BaseSettings):
     yookassa_return_url: str = "http://localhost:3000/subscription/success"
 
     # Подписки
-    subscription_price: int = 799  # рублей в месяц
+    subscription_price: int = 499  # рублей в месяц
     extra_requests_price: int = 99  # рублей за пакет
     extra_requests_count: int = 10  # запросов в пакете
 
     # Pro Trial (при регистрации)
-    pro_trial_days: int = 7  # 7 дней Pro Trial
+    pro_trial_days: int = 3  # 3 дня Pro Trial
     pro_trial_daily_limit: int = 15  # 15 запросов/день
 
     # Base (бесплатный план навсегда)

@@ -33,7 +33,7 @@ class SubscriptionStatus(BaseModel):
     subscription: Optional[SubscriptionInfo] = None
     limits: RequestLimits
     # Флаги планов
-    is_pro_trial: bool = False  # На Pro Trial (7 дней)
+    is_pro_trial: bool = False  # На Pro Trial (3 дня)
     is_base: bool = False  # На Base (бесплатный навсегда)
     is_pro: bool = False  # На Pro (платная подписка)
     is_pro_trial_expired: bool = False  # Pro Trial истёк, показать модалку
@@ -327,7 +327,7 @@ class SubscriptionService:
             return False
 
     async def create_pro_trial(self, user_id: str) -> bool:
-        """Создать Pro Trial подписку для нового пользователя (7 дней)"""
+        """Создать Pro Trial подписку для нового пользователя (3 дня)"""
         try:
             async with httpx.AsyncClient() as client:
                 now = datetime.utcnow()

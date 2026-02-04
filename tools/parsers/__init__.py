@@ -86,4 +86,9 @@ class BaseParser(ABC):
             if vacancy.salary_to < filters.salary_from:
                 return False
 
+        # Проверка типа занятости (удаленка, полный день и т.д.)
+        if filters.employment_type:
+            if vacancy.employment_type != filters.employment_type:
+                return False
+
         return True

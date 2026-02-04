@@ -57,8 +57,17 @@ ANALYST_SYSTEM_PROMPT = """Ты - аналитик запросов для по�
 "Найди работу в Москве от 80к" → CLARIFICATION (нет профессии)
 "Продавец в Краснодаре" → SEARCH (всё ясно)
 "Ищу работу продавцом или администратором в Новороссийске от 40к" → SEARCH (несколько профессий)
+"Нужна работа на удаленке по IT от 60к" → SEARCH (employment_type: "remote")
+"Ищу разработчика на удалёнке" → SEARCH (employment_type: "remote")
+"Удаленная работа бухгалтером" → SEARCH (employment_type: "remote")
+"Работа удаленно" → SEARCH (employment_type: "remote", но нет профессии - спроси)
 "Привет, как дела?" → CHAT
 "Что у меня в резюме?" → PROFILE
+
+ВАЖНО - РАСПОЗНАВАНИЕ ТИПА ЗАНЯТОСТИ:
+- "на удаленке", "на удалёнке", "удаленная работа", "удалённая работа", "удаленно", "удалённо", "remote", "дистанционно" → employment_type: "remote"
+- "полный день", "полная занятость" → employment_type: "full"
+- "частичная занятость", "неполный день", "подработка" → employment_type: "part"
 
 ФОРМАТ ОТВЕТА (строго JSON):
 {
@@ -268,6 +277,8 @@ class JobSearchCrew:
                     self.session.update_preferences(query=", ".join(params["professions"]))
                 if params.get("salary_from"):
                     self.session.update_preferences(salary_from=params["salary_from"])
+                if params.get("employment_type"):
+                    self.session.update_preferences(employment_type=params["employment_type"])
 
             return CrewResult(
                 response_text=response_text,
@@ -346,11 +357,13 @@ class JobSearchCrew:
         professions = params.get("professions", [])
         city = params.get("city", "")
         salary = params.get("salary_from")
+        employment_type = params.get("employment_type")  # remote, full, part
 
         user_prompt = f"""Параметры поиска:
 - Профессии: {', '.join(professions) if professions else 'не указана'}
 - Город: {city or 'не указан'}
 - Зарплата от: {salary or 'не указана'}
+- Тип занятости: {employment_type or 'не указан'}
 
 Сгенерируй поисковые запросы (JSON)."""
 
@@ -359,7 +372,7 @@ class JobSearchCrew:
                 print("[AI] Strategist DISABLED - using professions directly")
                 return {
                     "queries": professions if professions else ["работа"],
-                    "search_config": {"city": city, "salary_from": salary},
+                    "search_config": {"city": city, "salary_from": salary, "employment_type": employment_type},
                 }
 
             result = await self.fast_llm.chat(
@@ -376,6 +389,7 @@ class JobSearchCrew:
                 "search_config": {
                     "city": city,
                     "salary_from": salary,
+                    "employment_type": employment_type,
                 }
             }
 
@@ -389,6 +403,7 @@ class JobSearchCrew:
 
         city = config.get("city", "")
         salary_from = config.get("salary_from")
+        employment_type = config.get("employment_type")  # remote, full, part
 
         # Поиск в БД
         try:
@@ -396,6 +411,7 @@ class JobSearchCrew:
                 queries=queries[:10],
                 city=city,
                 salary_from=salary_from,
+                employment_type=employment_type,
                 search_in_feed=True,
                 search_online=False,
             )
@@ -413,6 +429,7 @@ class JobSearchCrew:
                     queries=queries[:5],
                     city=city,
                     salary_from=salary_from,
+                    employment_type=employment_type,
                     search_in_feed=False,
                     search_online=True,
                 )
@@ -456,6 +473,7 @@ class JobSearchCrew:
 
         city = config.get("city", "")
         salary_from = config.get("salary_from")
+        employment_type = config.get("employment_type")  # remote, full, part
 
         # 1. Сначала ищем в БД быстро - СТРИМИМ СРАЗУ без фильтрации
         try:
@@ -468,6 +486,7 @@ class JobSearchCrew:
                         query=query,
                         city=city,
                         salary_from=salary_from,
+                        employment_type=employment_type,
                         limit=50,
                         offset=0,
                     )
@@ -526,6 +545,7 @@ class JobSearchCrew:
                         query=query,
                         city=city,
                         salary_from=salary_from,
+                        employment_type=employment_type,
                     )
                     # HH
                     parallel_tasks.append(hh_parser.search(single_filter, limit=20))
@@ -950,6 +970,8 @@ class JobSearchCrew:
                 self.session.update_preferences(query=", ".join(params["professions"]))
             if params.get("salary_from"):
                 self.session.update_preferences(salary_from=params["salary_from"])
+            if params.get("employment_type"):
+                self.session.update_preferences(employment_type=params["employment_type"])
 
 
 async def process_chat_message(
