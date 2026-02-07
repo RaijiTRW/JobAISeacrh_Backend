@@ -252,7 +252,7 @@ class MassParsingJob:
                 # HH (увеличенный batch до 100)
                 try:
                     hh_batch = get_mass_batch_size("hh")
-                    hh_stats = await self._parse_source("hh", self.hh_parser, query, city, hh_batch)
+                    hh_stats = await self._parse_source("hh", self.hh_parser, query, city, hh_batch, cancel_event)
                     stats["hh"]["parsed"] += hh_stats["parsed"]
                     stats["hh"]["saved"] += hh_stats["saved"]
                     stats["hh"]["requests"] += 1
@@ -272,7 +272,7 @@ class MassParsingJob:
                 # SuperJob (batch до 30)
                 try:
                     sj_batch = get_mass_batch_size("superjob")
-                    sj_stats = await self._parse_source("superjob", self.sj_parser, query, city, sj_batch)
+                    sj_stats = await self._parse_source("superjob", self.sj_parser, query, city, sj_batch, cancel_event)
                     stats["superjob"]["parsed"] += sj_stats["parsed"]
                     stats["superjob"]["saved"] += sj_stats["saved"]
                     stats["superjob"]["requests"] += 1
@@ -280,8 +280,20 @@ class MassParsingJob:
                     stats["errors"].append(f"SuperJob [{i}]: {str(e)}")
                     print(f"[MassParsingJob] SuperJob error: {e}")
 
+                # Проверяем отмену после SuperJob
+                if cancel_event.is_set():
+                    print(f"[MassParsingJob] Cancel requested after SuperJob parsing at iteration {i+1}, stopping...")
+                    stats["status"] = "cancelled"
+                    break
+
                 # Умная задержка после SuperJob
                 await smart_delay(i, "superjob")
+
+                # Проверяем отмену перед микропаузой
+                if cancel_event.is_set():
+                    print(f"[MassParsingJob] Cancel requested before micro-break at iteration {i+1}, stopping...")
+                    stats["status"] = "cancelled"
+                    break
 
                 # Микропауза каждые N запросов
                 if (i + 1) % self.settings.micro_break_every == 0:
@@ -316,6 +328,7 @@ class MassParsingJob:
         query: str,
         city: str,
         batch_size: int,
+        cancel_event = None,
     ) -> dict:
         """Парсинг одного источника с увеличенным batch"""
         stats = {"parsed": 0, "saved": 0}
@@ -325,8 +338,18 @@ class MassParsingJob:
             vacancies = await parser.search(filters, limit=batch_size)
             stats["parsed"] = len(vacancies)
 
+            # Проверяем отмену перед сохранением
+            if cancel_event and cancel_event.is_set():
+                print(f"[MassParsingJob] Cancel detected before saving {source} vacancies")
+                return stats
+
             # Фильтруем военную тематику и сохраняем в БД
             for vacancy in vacancies:
+                # Проверяем отмену внутри цикла сохранения
+                if cancel_event and cancel_event.is_set():
+                    print(f"[MassParsingJob] Cancel detected while saving {source} vacancies")
+                    break
+
                 if is_military_vacancy(vacancy):
                     print(f"[ParsingJob] Skipped military vacancy: {vacancy.title}")
                     continue
