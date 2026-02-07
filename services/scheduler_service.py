@@ -146,28 +146,39 @@ class SchedulerService:
 
     async def get_all_job_states(self) -> dict[str, dict]:
         """Получить состояния всех джобов"""
+        print(f"[SchedulerService] ===== get_all_job_states START =====")
         try:
             import time
+            cache_buster = int(time.time() * 1000)
+            url = f"{self.base_url}/rest/v1/scheduler_job_state?_={cache_buster}&select=*"
+            print(f"[SchedulerService] URL: {url}")
+
             async with httpx.AsyncClient() as client:
-                # Добавляем cache-buster параметр
                 response = await client.get(
-                    f"{self.base_url}/rest/v1/scheduler_job_state",
-                    params={"select": "*", "_": int(time.time() * 1000)},
+                    url,
                     headers=self._headers(),
                     timeout=10.0,
                 )
 
+                print(f"[SchedulerService] Response status: {response.status_code}")
+
                 if response.status_code == 200:
                     data = response.json()
+                    print(f"[SchedulerService] Response data: {data}")
                     states = {row["job_id"]: row for row in data}
                     # Логируем состояние паузы для всех джобов
                     for job_id, state in states.items():
                         is_paused = state.get("is_paused", False)
-                        print(f"[SchedulerService] {job_id}: is_paused={is_paused}")
+                        print(f"[SchedulerService] {job_id}: is_paused={is_paused}, full_state={state}")
+                    print(f"[SchedulerService] Returning {len(states)} states")
                     return states
+                else:
+                    print(f"[SchedulerService] ERROR Response: {response.text}")
             return {}
         except Exception as e:
-            print(f"[SchedulerService] get_all_job_states error: {e}")
+            print(f"[SchedulerService] get_all_job_states EXCEPTION: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
 
     async def set_job_paused(

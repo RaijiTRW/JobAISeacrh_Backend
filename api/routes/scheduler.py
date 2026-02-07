@@ -101,8 +101,12 @@ async def get_scheduler_status(authorization: str = Header(None)):
     """Получить полный статус планировщика со всеми джобами"""
     await require_admin(authorization)
 
+    print(f"\n[API] ===== /status START =====")
     scheduler_info = get_job_status()
+    print(f"[API] scheduler_info: {scheduler_info}")
+
     job_states = await scheduler_service.get_all_job_states()
+    print(f"[API] job_states from DB: {job_states}")
 
     jobs = []
     for job_info in scheduler_info.get("jobs", []):
@@ -121,6 +125,8 @@ async def get_scheduler_status(authorization: str = Header(None)):
         else:
             status = "active"
 
+        print(f"[API] {job_id}: is_paused={is_paused}, status={status}, next_run={job_info.get('next_run')}")
+
         jobs.append(JobStatus(
             job_id=job_id,
             name=JOB_NAMES.get(job_id, job_info["name"]),
@@ -135,6 +141,11 @@ async def get_scheduler_status(authorization: str = Header(None)):
             } if last_run else None,
             trigger=job_info.get("trigger", ""),
         ))
+
+    print(f"[API] Returning {len(jobs)} jobs")
+    for job in jobs:
+        print(f"[API]   {job.job_id}: status={job.status}, is_paused={job.is_paused}, next_run={job.next_run}")
+    print(f"[API] ===== /status END =====\n")
 
     return SchedulerStatusResponse(
         scheduler_running=scheduler_info.get("running", False),
