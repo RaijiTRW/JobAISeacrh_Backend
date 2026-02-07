@@ -147,17 +147,24 @@ class SchedulerService:
     async def get_all_job_states(self) -> dict[str, dict]:
         """Получить состояния всех джобов"""
         try:
+            import time
             async with httpx.AsyncClient() as client:
+                # Добавляем cache-buster параметр
                 response = await client.get(
                     f"{self.base_url}/rest/v1/scheduler_job_state",
-                    params={"select": "*"},
+                    params={"select": "*", "_": int(time.time() * 1000)},
                     headers=self._headers(),
                     timeout=10.0,
                 )
 
                 if response.status_code == 200:
                     data = response.json()
-                    return {row["job_id"]: row for row in data}
+                    states = {row["job_id"]: row for row in data}
+                    # Логируем состояние паузы для всех джобов
+                    for job_id, state in states.items():
+                        is_paused = state.get("is_paused", False)
+                        print(f"[SchedulerService] {job_id}: is_paused={is_paused}")
+                    return states
             return {}
         except Exception as e:
             print(f"[SchedulerService] get_all_job_states error: {e}")
@@ -172,7 +179,19 @@ class SchedulerService:
         """Установить состояние паузы для джоба"""
         try:
             async with httpx.AsyncClient() as client:
+                # Сначала проверяем существует ли запись
+                check_response = await client.get(
+                    f"{self.base_url}/rest/v1/scheduler_job_state",
+                    params={"select": "job_id", "job_id": f"eq.{job_id}"},
+                    headers=self._headers(),
+                    timeout=10.0,
+                )
+
+                record_exists = check_response.status_code == 200 and len(check_response.json()) > 0
+                print(f"[SchedulerService] Record exists for {job_id}: {record_exists}")
+
                 update_data = {
+                    "job_id": job_id,  # Всегда включаем job_id для вставки
                     "is_paused": is_paused,
                     "updated_at": datetime.utcnow().isoformat(),
                 }
@@ -185,14 +204,29 @@ class SchedulerService:
                     update_data["paused_at"] = None
                     update_data["paused_by"] = None
 
-                response = await client.patch(
-                    f"{self.base_url}/rest/v1/scheduler_job_state",
-                    params={"job_id": f"eq.{job_id}"},
-                    headers=self._headers(),
-                    json=update_data,
-                    timeout=10.0,
-                )
-                return response.status_code in (200, 204)
+                if record_exists:
+                    # Обновляем существующую запись
+                    response = await client.patch(
+                        f"{self.base_url}/rest/v1/scheduler_job_state",
+                        params={"job_id": f"eq.{job_id}"},
+                        headers=self._headers(),
+                        json=update_data,
+                        timeout=10.0,
+                    )
+                    print(f"[SchedulerService] PATCH: job_id={job_id}, is_paused={is_paused}, status={response.status_code}")
+                else:
+                    # Создаём новую запись
+                    response = await client.post(
+                        f"{self.base_url}/rest/v1/scheduler_job_state",
+                        headers=self._headers(),
+                        json=update_data,
+                        timeout=10.0,
+                    )
+                    print(f"[SchedulerService] POST: job_id={job_id}, is_paused={is_paused}, status={response.status_code}")
+
+                if response.status_code not in (200, 201, 204):
+                    print(f"[SchedulerService] Response: {response.text}")
+                return response.status_code in (200, 201, 204)
         except Exception as e:
             print(f"[SchedulerService] set_job_paused error: {e}")
             return False
