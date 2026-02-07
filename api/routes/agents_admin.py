@@ -31,14 +31,29 @@ async def agents_status():
 @router.post("/toggle")
 async def toggle_agent(request: AgentToggleRequest):
     """Включить/выключить агента."""
-    print(f"[AGENTS TOGGLE] Received request: agent_id={request.agent_id}, enabled={request.enabled}")
-    if request.agent_id not in AGENTS:
-        print(f"[AGENTS TOGGLE] Unknown agent: {request.agent_id}")
-        return {"error": f"Unknown agent: {request.agent_id}", "available": list(AGENTS.keys())}
-    print(f"[AGENTS TOGGLE] Setting agent {request.agent_id} to {request.enabled}")
-    set_agent_enabled(request.agent_id, request.enabled)
-    print(f"[AGENTS TOGGLE] Successfully set agent {request.agent_id} to {request.enabled}")
-    return {"agent_id": request.agent_id, "enabled": request.enabled}
+    agent_id = request.agent_id
+    enabled = request.enabled
+
+    if agent_id not in AGENTS:
+        print(f"\n{'='*60}")
+        print(f"[AGENTS ERROR] Неизвестный агент: {agent_id}")
+        print(f"  Доступные агенты: {list(AGENTS.keys())}")
+        print(f"{'='*60}\n")
+        return {"error": f"Unknown agent: {agent_id}", "available": list(AGENTS.keys())}
+
+    agent_info = AGENTS[agent_id]
+    agent_name = agent_info.get("name", agent_id)
+    action = "ВКЛЮЧИТЬ" if enabled else "ВЫКЛЮЧИТЬ"
+
+    print(f"\n{'='*60}")
+    print(f"[AGENTS {action}] {agent_name} ({agent_id})")
+    print(f"  Описание: {agent_info.get('description', 'N/A')}")
+    print(f"  Действие: {'Агент ВКЛЮЧЁН' if enabled else 'Агент ВЫКЛЮЧЕН'}")
+    print(f"{'='*60}\n")
+
+    set_agent_enabled(agent_id, enabled)
+
+    return {"agent_id": agent_id, "enabled": enabled}
 
 
 @router.get("/usage")

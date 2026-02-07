@@ -150,6 +150,13 @@ async def pause_job(job_id: str, authorization: str = Header(None)):
     if job_id not in VALID_JOB_IDS:
         raise HTTPException(status_code=400, detail="Invalid job ID")
 
+    job_name = JOB_NAMES.get(job_id, job_id)
+    print(f"\n{'='*60}")
+    print(f"[ADMIN PAUSE] {job_name} ({job_id})")
+    print(f"  Пользователь: {user_id}")
+    print(f"  Действие: ОТКЛЮЧИТЬ автоматический запуск")
+    print(f"{'='*60}\n")
+
     success = await scheduler_service.set_job_paused(job_id, True, user_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to pause job")
@@ -164,6 +171,13 @@ async def resume_job(job_id: str, authorization: str = Header(None)):
 
     if job_id not in VALID_JOB_IDS:
         raise HTTPException(status_code=400, detail="Invalid job ID")
+
+    job_name = JOB_NAMES.get(job_id, job_id)
+    print(f"\n{'='*60}")
+    print(f"[ADMIN RESUME] {job_name} ({job_id})")
+    print(f"  Пользователь: {user_id}")
+    print(f"  Действие: ВКЛЮЧИТЬ автоматический запуск")
+    print(f"{'='*60}\n")
 
     success = await scheduler_service.set_job_paused(job_id, False, user_id)
     if not success:
@@ -184,6 +198,13 @@ async def stop_job(job_id: str, authorization: str = Header(None)):
     if job_id not in VALID_JOB_IDS:
         raise HTTPException(status_code=400, detail="Invalid job ID")
 
+    job_name = JOB_NAMES.get(job_id, job_id)
+    print(f"\n{'='*60}")
+    print(f"[ADMIN STOP] {job_name} ({job_id})")
+    print(f"  Пользователь: {user_id}")
+    print(f"  Действие: ОСТАНОВИТЬ текущее выполнение + отключить автозапуск")
+    print(f"{'='*60}\n")
+
     # Ставим на паузу чтобы предотвратить следующие запуски
     success = await scheduler_service.set_job_paused(job_id, True, user_id)
     if not success:
@@ -193,17 +214,23 @@ async def stop_job(job_id: str, authorization: str = Header(None)):
     from scheduler.scheduler import request_job_cancel
     request_job_cancel(job_id)
 
-    print(f"[Scheduler] Job {job_id} stopped (paused) and cancel requested by admin {user_id}")
     return {"success": True, "job_id": job_id, "is_paused": True}
 
 
 @router.post("/jobs/{job_id}/trigger")
 async def trigger_job(job_id: str, authorization: str = Header(None)):
     """Запустить джоб вручную"""
-    await require_admin(authorization)
+    user_id = await require_admin(authorization)
 
     if job_id not in VALID_JOB_IDS:
         raise HTTPException(status_code=400, detail="Invalid job ID")
+
+    job_name = JOB_NAMES.get(job_id, job_id)
+    print(f"\n{'='*60}")
+    print(f"[ADMIN TRIGGER] {job_name} ({job_id})")
+    print(f"  Пользователь: {user_id}")
+    print(f"  Действие: РУЧНОЙ ЗАПУСК (вне расписания)")
+    print(f"{'='*60}\n")
 
     try:
         if job_id == "mass_parsing_job":
@@ -224,6 +251,7 @@ async def trigger_job(job_id: str, authorization: str = Header(None)):
 
         return {"success": True, "job_id": job_id, "stats": stats}
     except Exception as e:
+        print(f"[ADMIN TRIGGER] ОШИБКА при выполнении {job_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Job execution failed: {str(e)}")
 
 
