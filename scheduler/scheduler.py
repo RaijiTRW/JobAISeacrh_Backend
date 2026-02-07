@@ -24,6 +24,10 @@ scheduler: AsyncIOScheduler = None
 # {job_id: {"started_at": datetime, "task": asyncio.Task}}
 running_jobs: Dict[str, dict] = {}
 
+# Сигналы отмены для jobs
+# {job_id: asyncio.Event}
+job_cancel_events: Dict[str, asyncio.Event] = {}
+
 
 def get_scheduler() -> AsyncIOScheduler:
     """Получить или создать scheduler"""
@@ -64,6 +68,26 @@ def get_all_running_jobs() -> Dict[str, dict]:
     return running_jobs.copy()
 
 
+def get_job_cancel_event(job_id: str) -> asyncio.Event:
+    """Получить или создать событие отмены для джоба"""
+    if job_id not in job_cancel_events:
+        job_cancel_events[job_id] = asyncio.Event()
+    return job_cancel_events[job_id]
+
+
+def request_job_cancel(job_id: str):
+    """Запросить отмену выполняющегося джоба"""
+    if job_id in job_cancel_events:
+        job_cancel_events[job_id].set()
+        print(f"[Scheduler] Cancel requested for job {job_id}")
+
+
+def clear_job_cancel_event(job_id: str):
+    """Очистить событие отмены для джоба"""
+    if job_id in job_cancel_events:
+        del job_cancel_events[job_id]
+
+
 async def _run_with_tracking(job_id: str, coro):
     """Запустить корутину с отслеживанием статуса"""
     mark_job_started(job_id)
@@ -72,6 +96,7 @@ async def _run_with_tracking(job_id: str, coro):
         return result
     finally:
         mark_job_finished(job_id)
+        clear_job_cancel_event(job_id)
 
 
 async def parsing_job_wrapper():

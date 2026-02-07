@@ -169,24 +169,31 @@ async def resume_job(job_id: str, authorization: str = Header(None)):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to resume job")
 
+    # Очищаем событие отмены на случай если оно было установлено
+    from scheduler.scheduler import clear_job_cancel_event
+    clear_job_cancel_event(job_id)
+
     return {"success": True, "job_id": job_id, "is_paused": False}
 
 
 @router.post("/jobs/{job_id}/stop")
 async def stop_job(job_id: str, authorization: str = Header(None)):
-    """Остановить выполняющийся джоб (ставит на паузу)"""
+    """Остановить выполняющийся джоб"""
     user_id = await require_admin(authorization)
 
     if job_id not in VALID_JOB_IDS:
         raise HTTPException(status_code=400, detail="Invalid job ID")
 
-    # APScheduler не поддерживает прерывание выполняющихся джобов
-    # Поэтому останавливаем через паузу - это предотвратит следующие запуски
+    # Ставим на паузу чтобы предотвратить следующие запуски
     success = await scheduler_service.set_job_paused(job_id, True, user_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to stop job")
 
-    print(f"[Scheduler] Job {job_id} stopped (paused) by admin {user_id}")
+    # Запрашиваем отмену текущего выполнения
+    from scheduler.scheduler import request_job_cancel
+    request_job_cancel(job_id)
+
+    print(f"[Scheduler] Job {job_id} stopped (paused) and cancel requested by admin {user_id}")
     return {"success": True, "job_id": job_id, "is_paused": True}
 
 

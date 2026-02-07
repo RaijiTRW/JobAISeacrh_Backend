@@ -230,7 +230,17 @@ class MassParsingJob:
 
             print(f"[MassParsingJob] Generated {len(session_requests)} request combinations")
 
+            # Получаем событие отмены для проверки
+            from scheduler.scheduler import get_job_cancel_event
+            cancel_event = get_job_cancel_event("mass_parsing_job")
+
             for i, req in enumerate(session_requests):
+                # Проверяем отмену перед каждой итерацией
+                if cancel_event.is_set():
+                    print(f"[MassParsingJob] Cancel requested at iteration {i+1}, stopping...")
+                    stats["status"] = "cancelled"
+                    break
+
                 query = req["query"]
                 city = req["city"]
 
@@ -249,6 +259,12 @@ class MassParsingJob:
                 except Exception as e:
                     stats["errors"].append(f"HH [{i}]: {str(e)}")
                     print(f"[MassParsingJob] HH error: {e}")
+
+                # Проверяем отмену после HH
+                if cancel_event.is_set():
+                    print(f"[MassParsingJob] Cancel requested after HH parsing at iteration {i+1}, stopping...")
+                    stats["status"] = "cancelled"
+                    break
 
                 # Умная задержка после HH
                 await smart_delay(i, "hh")
