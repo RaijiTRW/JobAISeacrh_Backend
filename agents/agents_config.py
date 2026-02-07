@@ -111,11 +111,15 @@ def is_agent_enabled(agent_id: str) -> bool:
 
 def set_agent_enabled(agent_id: str, enabled: bool):
     """Включить/выключить агента."""
+    print(f"[set_agent_enabled] Setting {agent_id} to {enabled}")
     if agent_id not in AGENTS:
         raise ValueError(f"Unknown agent: {agent_id}. Available: {list(AGENTS.keys())}")
     config = _load_config()
+    print(f"[set_agent_enabled] Current config: {config}")
     config[agent_id] = enabled
+    print(f"[set_agent_enabled] Updated config: {config}")
     _save_config(config)
+    print(f"[set_agent_enabled] Saved config to {CONFIG_FILE}")
 
 
 def get_all_agents_status() -> dict:
@@ -124,6 +128,7 @@ def get_all_agents_status() -> dict:
     result = {}
     for agent_id, info in AGENTS.items():
         result[agent_id] = {
+            "id": agent_id,  # Добавляем id для фронтенда
             **info,
             "enabled": config.get(agent_id, True),
         }

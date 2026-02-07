@@ -10,6 +10,7 @@ from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
+from typing import Dict, Optional
 
 from scheduler.jobs import run_parsing, run_avito_parsing, run_verification, run_mass_parsing, run_moderation
 from scheduler.human_behavior import is_working_hours
@@ -18,6 +19,10 @@ from services.scheduler_service import scheduler_service
 
 # Глобальный scheduler
 scheduler: AsyncIOScheduler = None
+
+# Отслеживание выполняющихся jobs
+# {job_id: {"started_at": datetime, "task": asyncio.Task}}
+running_jobs: Dict[str, dict] = {}
 
 
 def get_scheduler() -> AsyncIOScheduler:
@@ -35,6 +40,40 @@ def get_scheduler() -> AsyncIOScheduler:
     return scheduler
 
 
+def mark_job_started(job_id: str):
+    """Отметить, что джоб начал выполняться"""
+    running_jobs[job_id] = {
+        "started_at": datetime.now(),
+    }
+
+def mark_job_finished(job_id: str):
+    """Отметить, что джоб закончил выполняться"""
+    running_jobs.pop(job_id, None)
+
+def is_job_running(job_id: str) -> bool:
+    """Проверить, выполняется ли джоб прямо сейчас"""
+    return job_id in running_jobs
+
+def get_job_start_time(job_id: str) -> Optional[datetime]:
+    """Получить время начала выполнения джоба"""
+    info = running_jobs.get(job_id)
+    return info["started_at"] if info else None
+
+def get_all_running_jobs() -> Dict[str, dict]:
+    """Получить все выполняющиеся джобы"""
+    return running_jobs.copy()
+
+
+async def _run_with_tracking(job_id: str, coro):
+    """Запустить корутину с отслеживанием статуса"""
+    mark_job_started(job_id)
+    try:
+        result = await coro
+        return result
+    finally:
+        mark_job_finished(job_id)
+
+
 async def parsing_job_wrapper():
     """
     Wrapper для старого парсинга (оставлен для совместимости).
@@ -45,11 +84,8 @@ async def parsing_job_wrapper():
         return
 
     print(f"[Scheduler] Starting parsing job at {datetime.now()}")
-    try:
-        stats = await run_parsing()
-        print(f"[Scheduler] Parsing completed: {stats.get('total_saved', 0)} vacancies saved")
-    except Exception as e:
-        print(f"[Scheduler] Parsing error: {e}")
+    await _run_with_tracking("parsing_job", run_parsing())
+    print(f"[Scheduler] Parsing job finished")
 
 
 async def mass_parsing_job_wrapper():
@@ -64,7 +100,7 @@ async def mass_parsing_job_wrapper():
 
     print(f"[Scheduler] Starting MASS parsing job at {datetime.now()}")
     try:
-        stats = await run_mass_parsing()
+        stats = await _run_with_tracking("mass_parsing_job", run_mass_parsing())
         total_saved = stats.get('total_saved', 0)
         hh_saved = stats.get('hh', {}).get('saved', 0)
         sj_saved = stats.get('superjob', {}).get('saved', 0)
@@ -84,7 +120,7 @@ async def avito_job_wrapper():
 
     print(f"[Scheduler] Starting Avito parsing job at {datetime.now()}")
     try:
-        stats = await run_avito_parsing()
+        stats = await _run_with_tracking("avito_job", run_avito_parsing())
         print(f"[Scheduler] Avito completed: {stats.get('saved', 0)} vacancies saved")
     except Exception as e:
         print(f"[Scheduler] Avito error: {e}")
@@ -94,7 +130,7 @@ async def verification_job_wrapper():
     """Wrapper для верификации"""
     print(f"[Scheduler] Starting verification job at {datetime.now()}")
     try:
-        stats = await run_verification()
+        stats = await _run_with_tracking("verification_job", run_verification())
         print(f"[Scheduler] Verification completed: {stats.get('checked', 0)} checked, {stats.get('marked_inactive', 0)} inactive")
     except Exception as e:
         print(f"[Scheduler] Verification error: {e}")
@@ -104,7 +140,7 @@ async def moderation_job_wrapper():
     """Wrapper для AI модерации контента"""
     print(f"[Scheduler] Starting content moderation job at {datetime.now()}")
     try:
-        stats = await run_moderation()
+        stats = await _run_with_tracking("moderation_job", run_moderation())
         print(f"[Scheduler] Moderation completed: {stats.get('checked', 0)} checked, {stats.get('approved', 0)} approved, {stats.get('rejected', 0)} rejected")
     except Exception as e:
         print(f"[Scheduler] Moderation error: {e}")
@@ -114,7 +150,7 @@ async def volume_stats_wrapper():
     """Wrapper для записи статистики объёма вакансий (для графика)"""
     print(f"[Scheduler] Recording volume stats at {datetime.now()}")
     try:
-        await scheduler_service.record_volume_stats()
+        await _run_with_tracking("volume_stats_job", scheduler_service.record_volume_stats())
         print(f"[Scheduler] Volume stats recorded")
     except Exception as e:
         print(f"[Scheduler] Volume stats error: {e}")
@@ -195,11 +231,16 @@ def get_job_status() -> dict:
     jobs_info = []
 
     for job in sched.get_jobs():
+        is_running = is_job_running(job.id)
+        started_at = get_job_start_time(job.id)
+
         jobs_info.append({
             "id": job.id,
             "name": job.name,
             "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
             "trigger": str(job.trigger),
+            "is_running": is_running,
+            "started_at": started_at.isoformat() if started_at else None,
         })
 
     return {
@@ -211,22 +252,22 @@ def get_job_status() -> dict:
 async def trigger_parsing_now():
     """Запустить МАССОВЫЙ парсинг вручную (для тестирования)"""
     print("[Scheduler] Manual MASS parsing triggered")
-    return await run_mass_parsing()
+    return await _run_with_tracking("mass_parsing_job", run_mass_parsing())
 
 
 async def trigger_old_parsing_now():
     """Запустить старый парсинг вручную (для совместимости)"""
     print("[Scheduler] Manual old parsing triggered")
-    return await run_parsing()
+    return await _run_with_tracking("parsing_job", run_parsing())
 
 
 async def trigger_verification_now():
     """Запустить верификацию вручную (для тестирования)"""
     print("[Scheduler] Manual verification triggered")
-    return await run_verification()
+    return await _run_with_tracking("verification_job", run_verification())
 
 
 async def trigger_moderation_now():
     """Запустить AI модерацию вручную (для тестирования)"""
     print("[Scheduler] Manual moderation triggered")
-    return await run_moderation()
+    return await _run_with_tracking("moderation_job", run_moderation())

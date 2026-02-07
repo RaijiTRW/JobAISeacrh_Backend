@@ -111,8 +111,12 @@ async def get_scheduler_status(authorization: str = Header(None)):
         last_run = await scheduler_service.get_last_run_stats(job_id)
 
         # Определяем статус
+        is_running = job_info.get("is_running", False)
         is_paused = state.get("is_paused", False)
-        if is_paused:
+
+        if is_running:
+            status = "running"
+        elif is_paused:
             status = "paused"
         else:
             status = "active"
@@ -166,6 +170,24 @@ async def resume_job(job_id: str, authorization: str = Header(None)):
         raise HTTPException(status_code=500, detail="Failed to resume job")
 
     return {"success": True, "job_id": job_id, "is_paused": False}
+
+
+@router.post("/jobs/{job_id}/stop")
+async def stop_job(job_id: str, authorization: str = Header(None)):
+    """Остановить выполняющийся джоб (ставит на паузу)"""
+    user_id = await require_admin(authorization)
+
+    if job_id not in VALID_JOB_IDS:
+        raise HTTPException(status_code=400, detail="Invalid job ID")
+
+    # APScheduler не поддерживает прерывание выполняющихся джобов
+    # Поэтому останавливаем через паузу - это предотвратит следующие запуски
+    success = await scheduler_service.set_job_paused(job_id, True, user_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to stop job")
+
+    print(f"[Scheduler] Job {job_id} stopped (paused) by admin {user_id}")
+    return {"success": True, "job_id": job_id, "is_paused": True}
 
 
 @router.post("/jobs/{job_id}/trigger")
