@@ -150,13 +150,18 @@ class SchedulerService:
         try:
             import time
             cache_buster = int(time.time() * 1000)
-            url = f"{self.base_url}/rest/v1/scheduler_job_state?_={cache_buster}&select=*"
+            # Используем _cache вместо _, чтобы Supabase не интерпретировал как фильтр
+            url = f"{self.base_url}/rest/v1/scheduler_job_state?select=*&_cache={cache_buster}"
             print(f"[SchedulerService] URL: {url}")
+
+            # Добавляем Cache-Control header
+            headers = self._headers()
+            headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     url,
-                    headers=self._headers(),
+                    headers=headers,
                     timeout=10.0,
                 )
 
