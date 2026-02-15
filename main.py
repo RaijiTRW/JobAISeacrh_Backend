@@ -13,6 +13,7 @@ from api.routes import vacancies
 from api.routes import scheduler as scheduler_routes
 from api.routes import employer_moderation
 from api.routes import agents_admin
+from api.routes import resume
 from scheduler import start_scheduler, shutdown_scheduler
 
 
@@ -52,12 +53,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routes (AI поиск, scheduler, модерация вакансий работодателей, управление агентами)
+# Routes (AI поиск, scheduler, модерация вакансий работодателей, управление агентами, резюме)
 app.include_router(chat.router, prefix="/api")
 app.include_router(vacancies.router, prefix="/api/vacancies")
 app.include_router(scheduler_routes.router)
 app.include_router(employer_moderation.router)
 app.include_router(agents_admin.router)
+app.include_router(resume.router, prefix="/api")
 
 
 @app.get("/")

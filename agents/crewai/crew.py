@@ -39,6 +39,8 @@ ANALYST_SYSTEM_PROMPT = """Ты - аналитик запросов для по�
 
 ПАРАМЕТРЫ ДЛЯ ИЗВЛЕЧЕНИЯ:
 - professions: список профессий (может быть несколько!)
+- company: компания/бренд (если пользователь ищет работу в конкретной компании)
+- strict_company: true если нужно искать ТОЛЬКО в этой компании
 - city: город
 - salary_from: минимальная зарплата (число)
 - salary_to: максимальная зарплата (число)
@@ -51,6 +53,7 @@ ANALYST_SYSTEM_PROMPT = """Ты - аналитик запросов для по�
 - Есть профессия, но очень общая ("работа", "нормальная работа") → уточни сферу
 - НЕ спрашивай про зарплату если уже указана
 - НЕ спрашивай про город если уже указан
+- Если пользователь указал конкретную компанию + город ("в СДЭК в Новороссийске") → это SEARCH, даже без профессии
 - Задавай ОДИН вопрос, не несколько сразу
 
 ПРИМЕРЫ:
@@ -61,6 +64,7 @@ ANALYST_SYSTEM_PROMPT = """Ты - аналитик запросов для по�
 "Ищу разработчика на удалёнке" → SEARCH (employment_type: "remote")
 "Удаленная работа бухгалтером" → SEARCH (employment_type: "remote")
 "Работа удаленно" → SEARCH (employment_type: "remote", но нет профессии - спроси)
+"Ищу работу в СДЭК в Новороссийске" → SEARCH (company="СДЭК", strict_company=true)
 "Привет, как дела?" → CHAT
 "Что у меня в резюме?" → PROFILE
 
@@ -74,6 +78,8 @@ ANALYST_SYSTEM_PROMPT = """Ты - аналитик запросов для по�
     "request_type": "SEARCH" | "CLARIFICATION" | "CHAT" | "PROFILE",
     "parameters": {
         "professions": ["профессия1", "профессия2"],
+        "company": "название компании" | null,
+        "strict_company": true | false,
         "city": "город" | null,
         "salary_from": число | null,
         "salary_to": число | null,
@@ -92,6 +98,8 @@ STRATEGIST_SYSTEM_PROMPT = """Ты - стратег поиска ваканси�
 2. Учитывай разговорные названия профессий
 3. Не дублируй запросы
 4. ВАЖНО: НЕ заменяй профессию на смежные профессии!
+5. Если задана company и strict_company=true, ВСЕ запросы должны содержать эту компанию
+6. Если strict_company=true, запрещено добавлять другие компании в queries
 
 ЗАПРЕЩЕНИЯ (категорически запрещённые замены):
 - Продавец → НЕ добавляй: мерчандайзер, кладовщик, склад, комплектовщик, фасовщик
@@ -115,7 +123,9 @@ STRATEGIST_SYSTEM_PROMPT = """Ты - стратег поиска ваканси�
     "search_config": {
         "city": "город",
         "salary_from": число | null,
-        "salary_to": число | null
+        "salary_to": число | null,
+        "company": "название компании" | null,
+        "strict_company": true | false
     }
 }"""
 
@@ -187,6 +197,30 @@ class JobSearchCrew:
     Использует прямые вызовы OpenRouter API.
     """
 
+    COMPANY_ALIAS_MAP = {
+        "сдэк": {"сдэк", "cdek", "sdek"},
+        "cdek": {"сдэк", "cdek", "sdek"},
+        "sdek": {"сдэк", "cdek", "sdek"},
+        "озон": {"озон", "ozon"},
+        "ozon": {"озон", "ozon"},
+        "вайлдберриз": {"вайлдберриз", "wildberries", "wb", "вб"},
+        "wildberries": {"вайлдберриз", "wildberries", "wb", "вб"},
+        "яндекс": {"яндекс", "yandex"},
+        "yandex": {"яндекс", "yandex"},
+        "боксберри": {"боксберри", "boxberry"},
+        "boxberry": {"боксберри", "boxberry"},
+    }
+
+    SIMILAR_COMPANIES_MAP = {
+        "сдэк": ["Ozon", "Wildberries", "Яндекс Доставка", "Boxberry"],
+        "cdek": ["Ozon", "Wildberries", "Яндекс Доставка", "Boxberry"],
+        "sdek": ["Ozon", "Wildberries", "Яндекс Доставка", "Boxberry"],
+        "ozon": ["СДЭК", "Wildberries", "Яндекс Доставка"],
+        "озон": ["СДЭК", "Wildberries", "Яндекс Доставка"],
+        "wildberries": ["СДЭК", "Ozon", "Яндекс Доставка"],
+        "вайлдберриз": ["СДЭК", "Ozon", "Яндекс Доставка"],
+    }
+
     def __init__(
         self,
         user_id: str,
@@ -213,11 +247,16 @@ class JobSearchCrew:
 
         user_name = self.user_data.get("name") or self.user_data.get("first_name")
 
+        pending_response = self._handle_pending_similar_offer_message(message)
+        if pending_response:
+            return pending_response
+
         # Шаг 1: Анализ запроса
         print(f"[AI] Step 1: Analyzing request...")
         analysis = await self._analyze_request(message, history, context_summary)
 
         request_type = analysis.get("request_type", "CHAT")
+        params = analysis.get("parameters", {}) or {}
         print(f"[AI] Request type: {request_type}")
 
         # Шаг 2: Обработка по типу
@@ -226,7 +265,7 @@ class JobSearchCrew:
             response_text = await self._compose_response(
                 request_type="CLARIFICATION",
                 context={
-                    "parameters": analysis.get("parameters", {}),
+                    "parameters": params,
                     "question": question,
                 },
                 user_name=user_name,
@@ -239,8 +278,6 @@ class JobSearchCrew:
             )
 
         elif request_type == "SEARCH":
-            params = analysis.get("parameters", {})
-
             # Шаг 2: Генерация поисковых запросов
             print(f"[AI] Step 2: Creating search strategy...")
             strategy = await self._create_strategy(params)
@@ -256,6 +293,25 @@ class JobSearchCrew:
                 print(f"[AI] Step 4: Validating results...")
                 validated_vacancies = await self._validate_results(vacancies, params)
                 print(f"[AI] Validated: {len(validated_vacancies)} vacancies")
+
+            strict_company = bool(params.get("strict_company") and params.get("company"))
+            if strict_company:
+                validated_vacancies = self._filter_vacancies_by_company(
+                    validated_vacancies,
+                    str(params.get("company", "")),
+                )
+
+            if strict_company and not validated_vacancies:
+                self._set_pending_similar_offer(params)
+                return CrewResult(
+                    response_text=self._build_no_company_results_message(params),
+                    vacancies=[],
+                    request_type="CLARIFICATION",
+                    show_vacancies=False,
+                    suggested_actions=["offer_similar_companies"],
+                )
+
+            self._clear_pending_similar_offer()
 
             # Шаг 5: Формирование ответа
             print(f"[AI] Step 5: Composing response...")
@@ -339,7 +395,8 @@ class JobSearchCrew:
         try:
             if not is_agent_enabled("crew_analyst"):
                 print("[AI] Analyst DISABLED - defaulting to SEARCH")
-                return {"request_type": "SEARCH", "parameters": {"professions": [message], "city": ""}}
+                fallback = {"request_type": "SEARCH", "parameters": {"professions": [message], "city": ""}}
+                return self._normalize_analysis_output(fallback, message)
 
             result = await self.main_llm.chat(
                 system_prompt=ANALYST_SYSTEM_PROMPT,
@@ -347,20 +404,38 @@ class JobSearchCrew:
                 json_mode=True,
                 agent_id="crew_analyst",
             )
-            return self._parse_json(result)
+            parsed = self._parse_json(result)
+            return self._normalize_analysis_output(parsed, message)
         except Exception as e:
             print(f"[AI] Analyst error: {e}")
-            return {"request_type": "CHAT", "parameters": {}}
+            return self._normalize_analysis_output({"request_type": "CHAT", "parameters": {}}, message)
 
     async def _create_strategy(self, params: dict) -> dict:
         """Генерация поисковых запросов."""
         professions = params.get("professions", [])
+        company = params.get("company")
+        strict_company = bool(params.get("strict_company") and company)
         city = params.get("city", "")
         salary = params.get("salary_from")
         employment_type = params.get("employment_type")  # remote, full, part
 
+        if strict_company:
+            strict_queries = self._build_strict_company_queries(professions, str(company), city)
+            return {
+                "queries": strict_queries,
+                "search_config": {
+                    "city": city,
+                    "salary_from": salary,
+                    "employment_type": employment_type,
+                    "company": company,
+                    "strict_company": True,
+                },
+            }
+
         user_prompt = f"""Параметры поиска:
 - Профессии: {', '.join(professions) if professions else 'не указана'}
+- Компания: {company or 'не указана'}
+- Строго по компании: {'да' if strict_company else 'нет'}
 - Город: {city or 'не указан'}
 - Зарплата от: {salary or 'не указана'}
 - Тип занятости: {employment_type or 'не указан'}
@@ -372,7 +447,13 @@ class JobSearchCrew:
                 print("[AI] Strategist DISABLED - using professions directly")
                 return {
                     "queries": professions if professions else ["работа"],
-                    "search_config": {"city": city, "salary_from": salary, "employment_type": employment_type},
+                    "search_config": {
+                        "city": city,
+                        "salary_from": salary,
+                        "employment_type": employment_type,
+                        "company": company,
+                        "strict_company": strict_company,
+                    },
                 }
 
             result = await self.fast_llm.chat(
@@ -381,7 +462,22 @@ class JobSearchCrew:
                 json_mode=True,
                 agent_id="crew_strategist",
             )
-            return self._parse_json(result)
+            strategy = self._parse_json(result)
+            queries = self._dedupe_queries(strategy.get("queries", []))
+            if not queries:
+                queries = professions if professions else ["работа"]
+
+            search_config = strategy.get("search_config", {}) or {}
+            search_config["city"] = city
+            search_config["salary_from"] = salary
+            search_config["employment_type"] = employment_type
+            search_config["company"] = company
+            search_config["strict_company"] = strict_company
+
+            return {
+                "queries": queries[:10],
+                "search_config": search_config,
+            }
         except Exception as e:
             print(f"[AI] Strategy error: {e}")
             return {
@@ -390,6 +486,8 @@ class JobSearchCrew:
                     "city": city,
                     "salary_from": salary,
                     "employment_type": employment_type,
+                    "company": company,
+                    "strict_company": strict_company,
                 }
             }
 
@@ -601,6 +699,13 @@ class JobSearchCrew:
         if not chunk or not params:
             return chunk
 
+        company = params.get("company")
+        strict_company = bool(params.get("strict_company") and company)
+        if strict_company:
+            chunk = self._filter_vacancies_by_company(chunk, str(company))
+            if not chunk:
+                return []
+
         professions = params.get("professions", [])
 
         # Если агент валидатора отключен - возвращаем все
@@ -684,6 +789,13 @@ class JobSearchCrew:
         """Валидация вакансий через LLM."""
         if not vacancies:
             return []
+
+        company = params.get("company")
+        strict_company = bool(params.get("strict_company") and company)
+        if strict_company:
+            vacancies = self._filter_vacancies_by_company(vacancies, str(company))
+            if not vacancies:
+                return []
 
         if not is_agent_enabled("crew_validator"):
             print(f"[AI] Validator DISABLED - returning all {len(vacancies)} vacancies")
@@ -781,6 +893,282 @@ class JobSearchCrew:
             print(f"[AI] Validation error: {e}")
             # При ошибке - возвращаем все вакансии
             return vacancies
+
+    def _normalize_text(self, text: str) -> str:
+        """Нормализация текста для сравнений."""
+        return re.sub(r"[^a-zа-яё0-9]+", " ", str(text or "").lower()).strip()
+
+    def _dedupe_queries(self, queries: list[str]) -> list[str]:
+        """Удалить дубли и пустые запросы, сохранив порядок."""
+        result = []
+        seen = set()
+        for raw_query in queries or []:
+            query = " ".join(str(raw_query or "").split())
+            if not query:
+                continue
+            key = query.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(query)
+        return result
+
+    def _build_strict_company_queries(
+        self,
+        professions: list[str],
+        company: str,
+        city: str,
+    ) -> list[str]:
+        """Собрать запросы только с упоминанием конкретной компании."""
+        clean_professions = self._dedupe_queries(professions)
+        queries: list[str] = []
+
+        if clean_professions:
+            for profession in clean_professions[:3]:
+                queries.append(f"{profession} {company}")
+                queries.append(f"{company} {profession}")
+        else:
+            queries.extend([
+                company,
+                f"вакансии {company}",
+                f"работа в {company}",
+            ])
+
+        if city:
+            queries.append(f"{company} {city}")
+
+        return self._dedupe_queries(queries)[:6]
+
+    def _detect_company_from_message(self, message: str) -> Optional[str]:
+        """Детерминированное распознавание популярных брендов в сообщении."""
+        text = str(message or "").lower()
+        candidates = [
+            ("СДЭК", ["сдэк", "cdek", "sdek"]),
+            ("Ozon", ["ozon", "озон"]),
+            ("Wildberries", ["wildberries", "вайлдберриз", "wb", "вб"]),
+            ("Яндекс", ["яндекс", "yandex"]),
+            ("Boxberry", ["boxberry", "боксберри"]),
+        ]
+
+        for canonical, aliases in candidates:
+            for alias in aliases:
+                if re.search(fr"(?<![a-zа-яё0-9]){re.escape(alias)}(?![a-zа-яё0-9])", text):
+                    return canonical
+        return None
+
+    def _normalize_analysis_output(self, analysis: dict, message: str) -> dict:
+        """Привести выход analyst к устойчивому формату и добавить company-правила."""
+        analysis = analysis or {}
+        params = analysis.get("parameters", {})
+        if not isinstance(params, dict):
+            params = {}
+
+        professions = params.get("professions", [])
+        if isinstance(professions, str):
+            professions = [professions]
+        professions = [str(p).strip() for p in professions if str(p).strip()]
+        params["professions"] = professions
+
+        city = params.get("city")
+        if isinstance(city, str):
+            city = city.strip()
+        params["city"] = city or None
+
+        company = params.get("company")
+        if isinstance(company, list):
+            company = company[0] if company else None
+        if isinstance(company, str):
+            company = company.strip()
+        if not company:
+            company = self._detect_company_from_message(message)
+
+        strict_company = params.get("strict_company")
+        if isinstance(strict_company, str):
+            strict_company = strict_company.lower() in {"true", "1", "yes", "да"}
+        if strict_company is None:
+            strict_company = bool(company)
+
+        params["company"] = company or None
+        params["strict_company"] = bool(strict_company and company)
+
+        request_type = str(analysis.get("request_type", "CHAT")).upper()
+        if request_type not in {"SEARCH", "CLARIFICATION", "CHAT", "PROFILE"}:
+            request_type = "CHAT"
+
+        message_norm = self._normalize_text(message)
+        has_job_intent = any(keyword in message_norm for keyword in ("работ", "ваканс", "ищу", "найд", "подбер"))
+
+        if company and params.get("city") and (has_job_intent or request_type == "CLARIFICATION"):
+            request_type = "SEARCH"
+            analysis["clarification_question"] = None
+
+        analysis["request_type"] = request_type
+        analysis["parameters"] = params
+        return analysis
+
+    def _get_company_aliases(self, company: str) -> set[str]:
+        """Собрать алиасы компании для строгой фильтрации."""
+        normalized = self._normalize_text(company)
+        compact = normalized.replace(" ", "")
+        aliases = {compact, normalized}
+
+        for key, variants in self.COMPANY_ALIAS_MAP.items():
+            if key in compact or compact in variants:
+                aliases.update(variants)
+
+        for token in normalized.split():
+            if len(token) >= 3:
+                aliases.add(token)
+
+        return {alias for alias in aliases if alias}
+
+    def _filter_vacancies_by_company(self, vacancies: list, company: str) -> list:
+        """Оставить только вакансии, где явно упомянута нужная компания."""
+        if not vacancies or not company:
+            return vacancies
+
+        aliases = self._get_company_aliases(company)
+        filtered = []
+
+        for vacancy in vacancies:
+            company_text = self._normalize_text(getattr(vacancy, "company", ""))
+            title_text = self._normalize_text(getattr(vacancy, "title", ""))
+            description_text = self._normalize_text(getattr(vacancy, "description", ""))[:400]
+
+            haystack = f"{company_text} {title_text} {description_text}"
+            haystack_compact = haystack.replace(" ", "")
+
+            if any(alias in haystack or alias in haystack_compact for alias in aliases):
+                filtered.append(vacancy)
+
+        print(f"[AI] Company filter '{company}': {len(vacancies)} -> {len(filtered)}")
+        return filtered
+
+    def _get_similar_companies(self, company: str) -> list[str]:
+        """Вернуть похожие компании для fallback-предложения."""
+        key = self._normalize_text(company).replace(" ", "")
+        if key in self.SIMILAR_COMPANIES_MAP:
+            return self.SIMILAR_COMPANIES_MAP[key]
+
+        for map_key, value in self.SIMILAR_COMPANIES_MAP.items():
+            if map_key in key or key in map_key:
+                return value
+
+        return ["Ozon", "Wildberries", "Яндекс Доставка"]
+
+    def _build_no_company_results_message(self, params: dict) -> str:
+        """Сообщение при отсутствии вакансий в конкретной компании."""
+        company = params.get("company") or "указанной компании"
+        city = params.get("city")
+        similar = self._get_similar_companies(str(company))
+        example = ", ".join(similar[:2]) if similar else "другие компании"
+
+        if city:
+            return (
+                f"По запросу в компанию {company} в {city} сейчас не нашёл вакансий. "
+                f"Хочешь, предложу похожие компании (например, {example})?"
+            )
+
+        return (
+            f"По запросу в компанию {company} сейчас не нашёл вакансий. "
+            f"Хочешь, предложу похожие компании (например, {example})?"
+        )
+
+    def _set_pending_similar_offer(self, params: dict) -> None:
+        """Запомнить, что ждём ответ пользователя по похожим компаниям."""
+        if not self.session:
+            return
+        self.session.set_context("awaiting_similar_offer", True)
+        self.session.set_context("pending_company", params.get("company"))
+        self.session.set_context("pending_city", params.get("city"))
+
+    def _clear_pending_similar_offer(self) -> None:
+        """Сбросить состояние ожидания ответа про похожие компании."""
+        if not self.session:
+            return
+        self.session.set_context("awaiting_similar_offer", False)
+        self.session.set_context("pending_company", None)
+        self.session.set_context("pending_city", None)
+
+    def _is_affirmative(self, message: str) -> bool:
+        text = self._normalize_text(message)
+        if not text:
+            return False
+        patterns = [
+            r"\bда\b",
+            r"\bага\b",
+            r"\bок\b",
+            r"\bдавай\b",
+            r"\bпредлагай\b",
+            r"\bконечно\b",
+            r"\bхочу\b",
+            r"\byes\b",
+        ]
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _is_negative(self, message: str) -> bool:
+        text = self._normalize_text(message)
+        if not text:
+            return False
+        patterns = [
+            r"\bнет\b",
+            r"\bне надо\b",
+            r"\bне нужно\b",
+            r"\bнеа\b",
+            r"\bотмена\b",
+            r"\bхватит\b",
+            r"\bno\b",
+        ]
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _looks_like_new_search(self, message: str) -> bool:
+        text = self._normalize_text(message)
+        if not text:
+            return False
+        has_intent = any(keyword in text for keyword in ("работ", "ваканс", "ищу", "найд", "подбер"))
+        has_company = bool(self._detect_company_from_message(message))
+        return has_intent or has_company
+
+    def _handle_pending_similar_offer_message(self, message: str) -> Optional[CrewResult]:
+        """Обработать ответ пользователя после вопроса про похожие компании."""
+        if not self.session:
+            return None
+        if not self.session.get_context("awaiting_similar_offer", False):
+            return None
+
+        if self._looks_like_new_search(message):
+            self._clear_pending_similar_offer()
+            return None
+
+        if self._is_negative(message):
+            self._clear_pending_similar_offer()
+            return CrewResult(
+                response_text="Понял. Тогда укажи другую компанию или профессию, и продолжим поиск.",
+                vacancies=[],
+                request_type="CLARIFICATION",
+                show_vacancies=False,
+            )
+
+        if self._is_affirmative(message):
+            company = self.session.get_context("pending_company") or "этой компании"
+            options = self._get_similar_companies(str(company))
+            self._clear_pending_similar_offer()
+            return CrewResult(
+                response_text=(
+                    f"Ок, могу предложить похожие компании: {', '.join(options)}. "
+                    "Напиши, какие из них посмотреть."
+                ),
+                vacancies=[],
+                request_type="CLARIFICATION",
+                show_vacancies=False,
+            )
+
+        return CrewResult(
+            response_text="Напиши, пожалуйста, да или нет: предложить похожие компании?",
+            vacancies=[],
+            request_type="CLARIFICATION",
+            show_vacancies=False,
+        )
 
     async def _compose_response(
         self,
@@ -897,11 +1285,18 @@ class JobSearchCrew:
 
         user_name = self.user_data.get("name") or self.user_data.get("first_name")
 
+        pending_response = self._handle_pending_similar_offer_message(message)
+        if pending_response:
+            yield {'type': 'text', 'content': pending_response.response_text}
+            yield {'type': 'done'}
+            return
+
         # Шаг 1: Анализ запроса
         yield {'type': 'progress', 'message': 'Анализирую запрос...'}
 
         analysis = await self._analyze_request(message, history, context_summary)
         request_type = analysis.get("request_type", "CHAT")
+        params = analysis.get("parameters", {}) or {}
 
         # CLARIFICATION - сразу возвращаем
         if request_type == "CLARIFICATION":
@@ -909,7 +1304,7 @@ class JobSearchCrew:
             response_text = await self._compose_response(
                 request_type="CLARIFICATION",
                 context={
-                    "parameters": analysis.get("parameters", {}),
+                    "parameters": params,
                     "question": question,
                 },
                 user_name=user_name,
@@ -930,8 +1325,6 @@ class JobSearchCrew:
             return
 
         # SEARCH - streaming вакансий
-        params = analysis.get("parameters", {})
-
         yield {'type': 'progress', 'message': 'Создаю стратегию поиска...'}
         strategy = await self._create_strategy(params)
 
@@ -947,6 +1340,15 @@ class JobSearchCrew:
             yield {'type': 'vacancies_chunk', 'content': vacancy_chunk}
 
         print(f"[AI] Total chunks sent: {chunk_count}, total vacancies: {len(all_vacancies)}")
+
+        strict_company = bool(params.get("strict_company") and params.get("company"))
+        if strict_company and not all_vacancies:
+            self._set_pending_similar_offer(params)
+            yield {'type': 'text', 'content': self._build_no_company_results_message(params)}
+            yield {'type': 'done'}
+            return
+
+        self._clear_pending_similar_offer()
 
         # Чанки уже валидированы при отправке, формируем финальный ответ
         response_text = await self._compose_response(
