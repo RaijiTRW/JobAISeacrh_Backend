@@ -16,7 +16,7 @@ jobs:
       - name: Deploy to VDS via rsync
         uses: burnett01/rsync-deployments@6.0.0
         with:
-          switches: -avzr --delete --exclude='.env*' --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' --exclude='logs/'
+          switches: -avzr --delete --exclude='.env' --exclude='.env.example' --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' --exclude='logs/' --exclude='venv/' --exclude='.DS_Store'
           path: /
           remote_path: /var/www/jobaisearch/backend/JobAISeacrh_Backend
           remote_host: ${{ secrets.VDS_HOST }}
@@ -40,24 +40,30 @@ jobs:
             # Ensure logs directory exists
             mkdir -p logs
 
-            echo "📦 Installing Python dependencies..."
-            pip3 install -r requirements.txt --quiet
+            # Create venv if it doesn't exist
+            if [ ! -d "venv" ]; then
+              echo "Creating Python virtual environment..."
+              python3 -m venv venv
+            fi
 
-            echo "🔄 Starting or updating PM2 cluster..."
+            echo "📦 Installing/updating Python dependencies..."
+            ./venv/bin/pip install -r requirements.txt --quiet
+
+            echo "🔄 Starting or updating PM2 app..."
             # Check if app exists
             if pm2 describe jobaisearch-backend >/dev/null 2>&1; then
               echo "App exists, reloading with zero-downtime..."
-              # Reload cluster mode - restarts instances one by one
+              # Reload with graceful shutdown - sends SIGTERM, waits, then starts new
               pm2 reload ecosystem.config.js --update-env
             else
-              echo "Starting new cluster..."
+              echo "Starting new app..."
               pm2 start ecosystem.config.js
             fi
 
             # Save PM2 config for auto-start on reboot
             pm2 save --force
 
-            echo "⏳ Waiting for instances to be ready..."
+            echo "⏳ Waiting for app to be ready..."
             sleep 5
 
             echo "✅ Deployment complete! Zero-downtime achieved."

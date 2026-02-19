@@ -1,22 +1,19 @@
 // PM2 ecosystem config for JobAISeacrh Backend
-// Zero-downtime deployment with cluster mode
+// Single instance with graceful reload for zero-downtime deployment
 module.exports = {
   apps: [{
     name: 'jobaisearch-backend',
-    script: 'uvicorn',
-    args: 'main:app --host 0.0.0.0 --port 8000',
+    script: '/var/www/jobaisearch/backend/JobAISeacrh_Backend/venv/bin/python',
+    args: '-m uvicorn main:app --host 0.0.0.0 --port 8000',
     cwd: '/var/www/jobaisearch/backend/JobAISeacrh_Backend',
-    interpreter: 'python3',
-    // Cluster mode with 2 instances for zero-downtime reloads
-    instances: 2,
-    exec_mode: 'cluster',
+    instances: 1,
+    exec_mode: 'fork',
     env: {
       PYTHONPATH: '/var/www/jobaisearch/backend/JobAISeacrh_Backend',
     },
-    // Graceful shutdown settings
-    kill_timeout: 15000,
+    kill_timeout: 30000,
     wait_ready: true,
-    listen_timeout: 20000,
+    listen_timeout: 30000,
     autorestart: true,
     max_restarts: 10,
     min_uptime: '10s',
