@@ -23,7 +23,7 @@ jobs:
           remote_user: ${{ secrets.VDS_USERNAME }}
           remote_key: ${{ secrets.VDS_SSH_KEY }}
 
-      - name: Zero-downtime deployment on VDS
+      - name: Deploy on VDS
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VDS_HOST }}
@@ -49,14 +49,11 @@ jobs:
             echo "📦 Installing/updating Python dependencies..."
             ./venv/bin/pip install -r requirements.txt --quiet
 
-            echo "🔄 Starting or updating PM2 app..."
-            # Check if app exists
+            echo "🔄 Restarting application..."
+            # Restart or start the application
             if pm2 describe jobaisearch-backend >/dev/null 2>&1; then
-              echo "App exists, reloading with zero-downtime..."
-              # Reload with graceful shutdown - sends SIGTERM, waits, then starts new
-              pm2 reload ecosystem.config.js --update-env
+              pm2 restart jobaisearch-backend
             else
-              echo "Starting new app..."
               pm2 start ecosystem.config.js
             fi
 
@@ -64,17 +61,12 @@ jobs:
             pm2 save --force
 
             echo "⏳ Waiting for app to be ready..."
-            sleep 5
+            sleep 10
 
-            echo "✅ Deployment complete! Zero-downtime achieved."
+            echo "✅ Deployment complete!"
             pm2 status
 
             # Health check
             echo ""
             echo "🔍 Health check:"
-            curl -sf http://localhost:8000/health || echo "⚠️ Health check failed"
-
-            # Show recent logs
-            echo ""
-            echo "📋 Recent logs:"
-            pm2 logs jobaisearch-backend --lines 3 --nostream
+            curl -sf http://localhost:8000/health && echo "✓ Backend is healthy" || echo "✗ Backend health check failed"
