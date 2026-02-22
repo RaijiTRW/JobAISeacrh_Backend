@@ -50,21 +50,19 @@ jobs:
             ./venv/bin/pip install -r requirements.txt --quiet
 
             echo "🔄 Restarting application..."
-            # Restart or start the application
-            if pm2 describe jobaisearch-backend >/dev/null 2>&1; then
-              pm2 restart jobaisearch-backend
-            else
-              pm2 start ecosystem.config.js
-            fi
+            # Kill any existing processes on port 8000
+            sudo fuser -k 8000/tcp 2>/dev/null || true
+            sleep 2
 
-            # Save PM2 config for auto-start on reboot
-            pm2 save --force
+            # Note: Backend is managed by jobaisearch.service which runs both frontend and backend
+            # Just need to restart the systemd service
+            sudo systemctl restart jobaisearch.service
 
             echo "⏳ Waiting for app to be ready..."
-            sleep 10
+            sleep 15
 
             echo "✅ Deployment complete!"
-            pm2 status
+            sudo systemctl status jobaisearch.service --no-pager | head -20
 
             # Health check
             echo ""
