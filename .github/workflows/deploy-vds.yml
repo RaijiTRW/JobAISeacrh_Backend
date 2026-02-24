@@ -55,18 +55,21 @@ jobs:
             max_attempts=20
             attempt=1
             while true; do
+              tmp_log="$(mktemp)"
               set +e
-              DEPLOY_OUTPUT="$(sudo /usr/local/bin/jobaisearch-deploy 2>&1)"
+              sudo /usr/local/bin/jobaisearch-deploy >"$tmp_log" 2>&1
               DEPLOY_STATUS=$?
               set -e
 
-              printf '%s\n' "$DEPLOY_OUTPUT"
+              cat "$tmp_log" || true
 
               if [ "$DEPLOY_STATUS" -eq 0 ]; then
+                rm -f "$tmp_log"
                 break
               fi
 
-              if printf '%s\n' "$DEPLOY_OUTPUT" | grep -q "Deploy already running"; then
+              if grep -q "Deploy already running" "$tmp_log"; then
+                rm -f "$tmp_log"
                 if [ "$attempt" -ge "$max_attempts" ]; then
                   echo "Timed out waiting for deploy lock" >&2
                   exit 1
@@ -77,6 +80,7 @@ jobs:
                 continue
               fi
 
+              rm -f "$tmp_log"
               exit "$DEPLOY_STATUS"
             done
 
