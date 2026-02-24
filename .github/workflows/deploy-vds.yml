@@ -57,11 +57,21 @@ jobs:
             while true; do
               tmp_log="$(mktemp)"
               set +e
-              sudo /usr/local/bin/jobaisearch-deploy >"$tmp_log" 2>&1
+              sudo /usr/local/bin/jobaisearch-deploy >"$tmp_log" 2>&1 &
+              deploy_pid=$!
+              while kill -0 "$deploy_pid" 2>/dev/null; do
+                echo "[deploy] running..."
+                sleep 15
+              done
+              wait "$deploy_pid"
               DEPLOY_STATUS=$?
               set -e
 
-              cat "$tmp_log" || true
+              if [ "$DEPLOY_STATUS" -eq 0 ]; then
+                tail -n 200 "$tmp_log" || true
+              else
+                cat "$tmp_log" || true
+              fi
 
               if [ "$DEPLOY_STATUS" -eq 0 ]; then
                 rm -f "$tmp_log"
