@@ -57,15 +57,5 @@ jobs:
             ACTIVE_SLOT="$(sudo cat /etc/jobaisearch/active_slot)"
             echo "active-slot:${ACTIVE_SLOT}"
 
-            if [ "${ACTIVE_SLOT}" = "blue" ]; then
-              sudo systemctl is-active --quiet jobaisearch-frontend-blue.service
-              sudo systemctl is-active --quiet jobaisearch-backend-blue.service
-            else
-              sudo systemctl is-active --quiet jobaisearch-frontend-green.service
-              sudo systemctl is-active --quiet jobaisearch-backend-green.service
-            fi
-            sudo systemctl is-active --quiet caddy.service
-            echo "services:active"
-
             curl -kfsS -o /dev/null -w "site:%{http_code}\n" https://jobaisearch.ru/
             curl -kfsS -o /dev/null -w "health:%{http_code}\n" https://jobaisearch.ru/health
