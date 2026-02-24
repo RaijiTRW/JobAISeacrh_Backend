@@ -6,65 +6,66 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: deploy-jobaisearch-backend-vds
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Deploy to VDS via rsync
+      - name: Deploy backend repo snapshot to VDS via rsync
         uses: burnett01/rsync-deployments@6.0.0
         with:
-          switches: -avzr --delete --exclude='.env' --exclude='.env.example' --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' --exclude='logs/' --exclude='venv/' --exclude='.DS_Store'
-          path: /
-          remote_path: /var/www/jobaisearch/backend/JobAISeacrh_Backend
+          switches: >-
+            -avzr --delete
+            --exclude='.env'
+            --exclude='.env.example'
+            --exclude='__pycache__/'
+            --exclude='*.pyc'
+            --exclude='.git/'
+            --exclude='logs/'
+            --exclude='venv/'
+            --exclude='.DS_Store'
+            --exclude='._*'
+          path: ./
+          remote_path: /var/www/jobaisearch/repo/backend/JobAISeacrh_Backend/
           remote_host: ${{ secrets.VDS_HOST }}
           remote_user: ${{ secrets.VDS_USERNAME }}
           remote_key: ${{ secrets.VDS_SSH_KEY }}
 
-      - name: Deploy on VDS
+      - name: Zero-downtime deploy on VDS
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VDS_HOST }}
           username: ${{ secrets.VDS_USERNAME }}
           key: ${{ secrets.VDS_SSH_KEY }}
           port: 22
-          command_timeout: 30m
+          command_timeout: 45m
           script_stop: true
           script: |
-            set -e
+            set -euo pipefail
 
-            cd /var/www/jobaisearch/backend/JobAISeacrh_Backend
+            sudo /usr/local/bin/jobaisearch-deploy
 
-            # Ensure logs directory exists
-            mkdir -p logs
+            ACTIVE_SLOT="$(sudo cat /etc/jobaisearch/active_slot)"
+            echo "active-slot:${ACTIVE_SLOT}"
 
-            # Create venv if it doesn't exist
-            if [ ! -d "venv" ]; then
-              echo "Creating Python virtual environment..."
-              python3 -m venv venv
+            if [ "${ACTIVE_SLOT}" = "blue" ]; then
+              sudo systemctl is-active --quiet jobaisearch-frontend-blue.service
+              sudo systemctl is-active --quiet jobaisearch-backend-blue.service
+            else
+              sudo systemctl is-active --quiet jobaisearch-frontend-green.service
+              sudo systemctl is-active --quiet jobaisearch-backend-green.service
             fi
+            sudo systemctl is-active --quiet caddy.service
+            echo "services:active"
 
-            echo "📦 Installing/updating Python dependencies..."
-            ./venv/bin/pip install -r requirements.txt --quiet
-
-            echo "🔄 Restarting application..."
-            # Kill any existing processes on port 8000
-            sudo fuser -k 8000/tcp 2>/dev/null || true
-            sleep 2
-
-            # Note: Backend is managed by jobaisearch.service which runs both frontend and backend
-            # Just need to restart the systemd service
-            sudo systemctl restart jobaisearch.service
-
-            echo "⏳ Waiting for app to be ready..."
-            sleep 15
-
-            echo "✅ Deployment complete!"
-            sudo systemctl status jobaisearch.service --no-pager | head -20
-
-            # Health check
-            echo ""
-            echo "🔍 Health check:"
-            curl -sf http://localhost:8000/health && echo "✓ Backend is healthy" || echo "✗ Backend health check failed"
+            curl -kfsS -o /dev/null -w "site:%{http_code}\n" https://jobaisearch.ru/
+            curl -kfsS -o /dev/null -w "health:%{http_code}\n" https://jobaisearch.ru/health
