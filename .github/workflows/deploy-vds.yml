@@ -52,7 +52,33 @@ jobs:
           script: |
             set -euo pipefail
 
-            sudo /usr/local/bin/jobaisearch-deploy
+            max_attempts=20
+            attempt=1
+            while true; do
+              set +e
+              DEPLOY_OUTPUT="$(sudo /usr/local/bin/jobaisearch-deploy 2>&1)"
+              DEPLOY_STATUS=$?
+              set -e
+
+              printf '%s\n' "$DEPLOY_OUTPUT"
+
+              if [ "$DEPLOY_STATUS" -eq 0 ]; then
+                break
+              fi
+
+              if printf '%s\n' "$DEPLOY_OUTPUT" | grep -q "Deploy already running"; then
+                if [ "$attempt" -ge "$max_attempts" ]; then
+                  echo "Timed out waiting for deploy lock" >&2
+                  exit 1
+                fi
+                echo "Deploy lock is busy (${attempt}/${max_attempts}), waiting 20s..."
+                attempt=$((attempt + 1))
+                sleep 20
+                continue
+              fi
+
+              exit "$DEPLOY_STATUS"
+            done
 
             ACTIVE_SLOT="$(sudo cat /etc/jobaisearch/active_slot)"
             echo "active-slot:${ACTIVE_SLOT}"
