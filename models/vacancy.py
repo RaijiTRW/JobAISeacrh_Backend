@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
@@ -18,6 +18,12 @@ class Vacancy(BaseModel):
     source: str  # hh, avito, superjob, platform
     published_at: Optional[datetime] = None
     user_id: Optional[str] = None  # ID владельца (для platform вакансий)
+    # AI match metadata (optional; attached at runtime)
+    fit_status: Optional[str] = None  # fit | partial | reject | unknown
+    fit_score: Optional[int] = None
+    fit_confidence: Optional[float] = None
+    matched_reasons: list[str] = Field(default_factory=list)
+    mismatch_reasons: list[str] = Field(default_factory=list)
 
     @property
     def salary_display(self) -> str:
@@ -32,14 +38,14 @@ class Vacancy(BaseModel):
 
 class SearchFilters(BaseModel):
     query: Optional[str] = None        # Для парсеров (один запрос)
-    queries: list[str] = []            # Для tool (массив от ИИ)
+    queries: list[str] = Field(default_factory=list)  # Для tool (массив от ИИ)
     city: Optional[str] = None
     salary_from: Optional[int] = None
     salary_to: Optional[int] = None
     experience: Optional[str] = None  # no_experience, 1-3, 3-6, 6+
     employment_type: Optional[str] = None  # full, part, remote
-    exclude_keywords: list[str] = []
-    exclude_vacancy_ids: list[str] = []  # ID вакансий для исключения
+    exclude_keywords: list[str] = Field(default_factory=list)
+    exclude_vacancy_ids: list[str] = Field(default_factory=list)  # ID вакансий для исключения
     # Режим поиска
     search_in_feed: bool = True   # Поиск в ленте (БД)
     search_online: bool = True    # Поиск в сети (live)

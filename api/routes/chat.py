@@ -5,7 +5,7 @@ API эндпоинты для чата
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import json
 import asyncio
@@ -19,10 +19,8 @@ def json_serializer(obj):
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
-from models.chat import ChatRequest, ChatResponse, UserPreferences
-from models.vacancy import SearchFilters
+from models.chat import LifestylePreferences
 from agents.crewai import JobSearchCrew, session_manager
-from tools.search import vacancy_search
 from services.user_profile import user_profile_service
 from services.subscription_service import subscription_service
 from config import get_settings
@@ -37,12 +35,14 @@ class ChatMessageRequest(BaseModel):
     user_id: str
     search_in_feed: bool = True  # Поиск в ленте (БД)
     search_online: bool = True   # Поиск в сети (live)
-    exclude_vacancy_ids: list[str] = []  # ID вакансий для исключения
+    exclude_vacancy_ids: list[str] = Field(default_factory=list)  # ID вакансий для исключения
+    lifestyle_preferences: Optional[LifestylePreferences] = None
 
 
 class ChatMessageResponse(BaseModel):
     message: str
-    vacancies: list[dict] = []
+    vacancies: list[dict] = Field(default_factory=list)
+    rejected_vacancies: list[dict] = Field(default_factory=list)
     chat_id: str
 
 
@@ -62,6 +62,9 @@ async def send_message(request: ChatMessageRequest):
     use_live_search = request.search_online
     if status.subscription and not status.subscription.can_search_online:
         use_live_search = False  # Принудительно отключаем для Base плана
+    use_feed_search = request.search_in_feed
+    if not use_feed_search and not use_live_search:
+        use_feed_search = True
 
     # Получаем или создаём сессию
     session = session_manager.get_or_create_session(
@@ -86,13 +89,19 @@ async def send_message(request: ChatMessageRequest):
         message=request.message,
         conversation_history=session.get_recent_history(),
         use_live_search=use_live_search,
+        use_feed_search=use_feed_search,
+        exclude_vacancy_ids=request.exclude_vacancy_ids,
+        lifestyle_preferences=request.lifestyle_preferences.model_dump() if request.lifestyle_preferences else None,
     )
 
     # Сохраняем в историю
     session.add_message("user", request.message)
     session.add_message("assistant", result.response_text)
 
-    print(f"[Chat] Response type: {result.request_type}, vacancies: {len(result.vacancies)}")
+    print(
+        f"[Chat] Response type: {result.request_type}, "
+        f"vacancies: {len(result.vacancies)}, rejected: {len(result.rejected_vacancies)}"
+    )
 
     # Конвертируем вакансии в JSON
     vacancies_json = []
@@ -102,9 +111,17 @@ async def send_message(request: ChatMessageRequest):
         elif isinstance(v, dict):
             vacancies_json.append(v)
 
+    rejected_vacancies_json = []
+    for v in result.rejected_vacancies:
+        if hasattr(v, 'model_dump'):
+            rejected_vacancies_json.append(v.model_dump(mode='json'))
+        elif isinstance(v, dict):
+            rejected_vacancies_json.append(v)
+
     return ChatMessageResponse(
         message=result.response_text,
         vacancies=vacancies_json,
+        rejected_vacancies=rejected_vacancies_json,
         chat_id=session.id,
     )
 
@@ -125,6 +142,9 @@ async def send_message_stream(request: ChatMessageRequest):
     use_live_search = request.search_online
     if status.subscription and not status.subscription.can_search_online:
         use_live_search = False
+    use_feed_search = request.search_in_feed
+    if not use_feed_search and not use_live_search:
+        use_feed_search = True
 
     # Получаем или создаём сессию
     session = session_manager.get_or_create_session(
@@ -159,6 +179,9 @@ async def send_message_stream(request: ChatMessageRequest):
                 message=request.message,
                 conversation_history=session.get_recent_history(limit=10),
                 use_live_search=use_live_search,
+                use_feed_search=use_feed_search,
+                exclude_vacancy_ids=request.exclude_vacancy_ids,
+                lifestyle_preferences=request.lifestyle_preferences.model_dump() if request.lifestyle_preferences else None,
             ):
                 if event['type'] == 'text':
                     # Стримим текст по словам
@@ -180,6 +203,15 @@ async def send_message_stream(request: ChatMessageRequest):
                     print(f"[Chat Stream] Sending vacancies_chunk with {len(vacancies_json)} vacancies")
                     yield f"data: {json.dumps({'type': 'vacancies_chunk', 'content': vacancies_json}, default=json_serializer)}\n\n"
                     print(f"[Chat Stream] vacancies_chunk sent successfully")
+
+                elif event['type'] == 'rejected_vacancies':
+                    rejected_json = []
+                    for v in event['content']:
+                        if hasattr(v, 'model_dump'):
+                            rejected_json.append(v.model_dump(mode='json'))
+                        elif isinstance(v, dict):
+                            rejected_json.append(v)
+                    yield f"data: {json.dumps({'type': 'rejected_vacancies', 'content': rejected_json}, default=json_serializer)}\n\n"
 
                 elif event['type'] == 'progress':
                     # Прогресс можно логировать, но не отправляем клиенту

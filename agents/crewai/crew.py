@@ -4,7 +4,7 @@ JobSearchCrew - мультиагентная система поиска раб�
 """
 import json
 import re
-from typing import Optional, AsyncIterator
+from typing import Optional, AsyncIterator, Any
 from dataclasses import dataclass, field
 
 from .llm_config import get_main_llm, get_fast_llm
@@ -15,6 +15,7 @@ from agents.agents_config import is_agent_enabled
 from tools.search import vacancy_search
 from models.vacancy import SearchFilters
 from services.user_profile import user_profile_service
+from services.lifestyle_matcher import lifestyle_matcher
 
 
 @dataclass
@@ -22,6 +23,7 @@ class CrewResult:
     """Результат работы Crew."""
     response_text: str
     vacancies: list = field(default_factory=list)
+    rejected_vacancies: list = field(default_factory=list)
     request_type: str = "CHAT"
     show_vacancies: bool = True
     suggested_actions: list = field(default_factory=list)
@@ -238,6 +240,9 @@ class JobSearchCrew:
         message: str,
         conversation_history: list[dict] = None,
         use_live_search: bool = True,
+        use_feed_search: bool = True,
+        exclude_vacancy_ids: Optional[list[str]] = None,
+        lifestyle_preferences: Optional[dict] = None,
     ) -> CrewResult:
         """Обработать сообщение пользователя."""
         history = conversation_history or []
@@ -284,15 +289,29 @@ class JobSearchCrew:
 
             # Шаг 3: Выполнение поиска
             print(f"[AI] Step 3: Executing search...")
-            vacancies = await self._execute_search(strategy, use_live_search)
+            vacancies = await self._execute_search(
+                strategy,
+                use_live_search=use_live_search,
+                use_feed_search=use_feed_search,
+                exclude_vacancy_ids=exclude_vacancy_ids,
+            )
             print(f"[AI] Found {len(vacancies)} vacancies")
 
             # Шаг 4: Валидация
             validated_vacancies = vacancies
+            rejected_vacancies: list = []
             if vacancies and len(vacancies) > 0:
                 print(f"[AI] Step 4: Validating results...")
                 validated_vacancies = await self._validate_results(vacancies, params)
                 print(f"[AI] Validated: {len(validated_vacancies)} vacancies")
+                validated_vacancies, rejected_vacancies = self._apply_lifestyle_preferences(
+                    validated_vacancies,
+                    lifestyle_preferences,
+                )
+                print(
+                    f"[AI] Lifestyle filter: {len(validated_vacancies)} accepted, "
+                    f"{len(rejected_vacancies)} rejected"
+                )
 
             strict_company = bool(params.get("strict_company") and params.get("company"))
             if strict_company:
@@ -339,6 +358,7 @@ class JobSearchCrew:
             return CrewResult(
                 response_text=response_text,
                 vacancies=validated_vacancies,
+                rejected_vacancies=rejected_vacancies,
                 request_type=request_type,
                 show_vacancies=True,
             )
@@ -491,7 +511,13 @@ class JobSearchCrew:
                 }
             }
 
-    async def _execute_search(self, strategy: dict, use_live_search: bool) -> list:
+    async def _execute_search(
+        self,
+        strategy: dict,
+        use_live_search: bool,
+        use_feed_search: bool = True,
+        exclude_vacancy_ids: Optional[list[str]] = None,
+    ) -> list:
         """Выполнение поиска вакансий."""
         queries = strategy.get("queries", [])
         config = strategy.get("search_config", {})
@@ -502,23 +528,30 @@ class JobSearchCrew:
         city = config.get("city", "")
         salary_from = config.get("salary_from")
         employment_type = config.get("employment_type")  # remote, full, part
+        exclude_ids = [str(v) for v in (exclude_vacancy_ids or [])]
+
+        all_vacancies: list = []
 
         # Поиск в БД
-        try:
-            db_filters = SearchFilters(
-                queries=queries[:10],
-                city=city,
-                salary_from=salary_from,
-                employment_type=employment_type,
-                search_in_feed=True,
-                search_online=False,
-            )
-            db_result = await vacancy_search.search(db_filters)
-            all_vacancies = list(db_result.vacancies)
-            print(f"[AI] DB: {len(all_vacancies)} vacancies")
-        except Exception as e:
-            print(f"[AI] DB search error: {e}")
-            all_vacancies = []
+        if use_feed_search:
+            try:
+                db_filters = SearchFilters(
+                    queries=queries[:10],
+                    city=city,
+                    salary_from=salary_from,
+                    employment_type=employment_type,
+                    exclude_vacancy_ids=exclude_ids,
+                    search_in_feed=True,
+                    search_online=False,
+                )
+                db_result = await vacancy_search.search(db_filters)
+                all_vacancies = list(db_result.vacancies)
+                print(f"[AI] DB: {len(all_vacancies)} vacancies")
+            except Exception as e:
+                print(f"[AI] DB search error: {e}")
+                all_vacancies = []
+        else:
+            print("[AI] DB search skipped by request")
 
         # Live поиск если нужен
         if use_live_search:
@@ -528,6 +561,7 @@ class JobSearchCrew:
                     city=city,
                     salary_from=salary_from,
                     employment_type=employment_type,
+                    exclude_vacancy_ids=exclude_ids,
                     search_in_feed=False,
                     search_online=True,
                 )
@@ -543,6 +577,13 @@ class JobSearchCrew:
                 print(f"[AI] Live: +{len(live_result.vacancies)} vacancies")
             except Exception as e:
                 print(f"[AI] Live search error: {e}")
+        else:
+            print("[AI] Live search skipped by request")
+
+        # Дополнительная гарантия исключения ID для режима "найди ещё"
+        if exclude_ids:
+            exclude_set = set(exclude_ids)
+            all_vacancies = [v for v in all_vacancies if str(getattr(v, "id", "")) not in exclude_set]
 
         return all_vacancies
 
@@ -550,18 +591,24 @@ class JobSearchCrew:
         self,
         strategy: dict,
         use_live_search: bool,
-        params: dict = None
-    ) -> AsyncIterator[list]:
+        params: dict = None,
+        use_feed_search: bool = True,
+        exclude_vacancy_ids: Optional[list[str]] = None,
+        lifestyle_preferences: Optional[dict] = None,
+    ) -> AsyncIterator[dict]:
         """
-        Streaming поиск - yield вакансии по мере нахождения.
+        Streaming поиск с поэтапной фильтрацией.
 
         Args:
             strategy: Стратегия поиска с queries
             use_live_search: Использовать live поиск
             params: Параметры поиска для валидации (professions, city, etc.)
+            use_feed_search: Искать в сохраненной ленте (БД)
+            exclude_vacancy_ids: ID вакансий, которые нужно исключить
+            lifestyle_preferences: Предпочтения стиля работы
 
         Yields:
-            list: Чанк вакансий
+            dict: {"accepted": [...], "rejected": [...]}
         """
         queries = strategy.get("queries", [])
         config = strategy.get("search_config", {})
@@ -572,71 +619,74 @@ class JobSearchCrew:
         city = config.get("city", "")
         salary_from = config.get("salary_from")
         employment_type = config.get("employment_type")  # remote, full, part
+        exclude_set = {str(v) for v in (exclude_vacancy_ids or [])}
+        emitted_ids = set(exclude_set)
 
-        # 1. Сначала ищем в БД быстро - СТРИМИМ СРАЗУ без фильтрации
-        try:
-            from services.vacancy_storage import vacancy_storage_service
+        # 1) Сначала лента (БД), если включена
+        if use_feed_search:
+            try:
+                from services.vacancy_storage import vacancy_storage_service
 
-            all_db_vacancies = []
-            for query in queries[:10]:
-                try:
-                    stored, _ = await vacancy_storage_service.search_vacancies(
-                        query=query,
-                        city=city,
-                        salary_from=salary_from,
-                        employment_type=employment_type,
-                        limit=50,
-                        offset=0,
-                    )
-                    # Конвертируем и добавляем сразу
-                    for sv in stored:
-                        vacancy = vacancy_storage_service.to_vacancy(sv)
-                        all_db_vacancies.append(vacancy)
-                except Exception as e:
-                    print(f"[AI] DB search error for '{query}': {e}")
+                all_db_vacancies = []
+                for query in queries[:10]:
+                    try:
+                        stored, _ = await vacancy_storage_service.search_vacancies(
+                            query=query,
+                            city=city,
+                            salary_from=salary_from,
+                            employment_type=employment_type,
+                            limit=50,
+                            offset=0,
+                        )
+                        for sv in stored:
+                            vacancy = vacancy_storage_service.to_vacancy(sv)
+                            vid = self._vacancy_id(vacancy)
+                            if vid and vid not in emitted_ids:
+                                all_db_vacancies.append(vacancy)
+                                emitted_ids.add(vid)
+                    except Exception as e:
+                        print(f"[AI] DB search error for '{query}': {e}")
 
-            if all_db_vacancies:
-                # Дедупликация только по ID
-                seen_ids = set()
-                unique_db = []
-                for v in all_db_vacancies:
-                    if v.id not in seen_ids:
-                        seen_ids.add(v.id)
-                        unique_db.append(v)
+                if all_db_vacancies:
+                    print(f"[AI] DB: {len(all_db_vacancies)} vacancies found, streaming with validation...")
 
-                print(f"[AI] DB: {len(unique_db)} vacancies found, streaming with validation...")
+                    chunk_size = 10
+                    for i in range(0, len(all_db_vacancies), chunk_size):
+                        chunk = all_db_vacancies[i:i + chunk_size]
+                        validated_chunk = await self._validate_chunk(chunk, params)
+                        accepted_chunk, rejected_chunk = self._apply_lifestyle_preferences(
+                            validated_chunk,
+                            lifestyle_preferences,
+                        )
+                        if accepted_chunk or rejected_chunk:
+                            print(
+                                f"[AI] DB chunk {i//chunk_size + 1}: "
+                                f"{len(chunk)} -> {len(accepted_chunk)} accepted, {len(rejected_chunk)} rejected"
+                            )
+                            yield {"accepted": accepted_chunk, "rejected": rejected_chunk}
+                        else:
+                            print(f"[AI] DB chunk {i//chunk_size + 1}: all filtered out")
+                    print(f"[AI] DB: {len(all_db_vacancies)} vacancies processed")
+            except Exception as e:
+                print(f"[AI] DB search error: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("[AI] DB search skipped by request")
 
-                # Стримим чанками по 10 С ВАЛИДАЦИЕЙ
-                chunk_size = 10
-                for i in range(0, len(unique_db), chunk_size):
-                    chunk = unique_db[i:i + chunk_size]
-                    # Валидируем чанк перед отправкой
-                    validated_chunk = await self._validate_chunk(chunk, params)
-                    if validated_chunk:
-                        print(f"[AI] DB chunk {i//chunk_size + 1}: {len(chunk)} → {len(validated_chunk)} after validation")
-                        yield validated_chunk
-                    else:
-                        print(f"[AI] DB chunk {i//chunk_size + 1}: all filtered out")
-                print(f"[AI] DB: {len(unique_db)} vacancies processed")
-        except Exception as e:
-            print(f"[AI] DB search error: {e}")
-            import traceback
-            traceback.print_exc()
-
-        # 2. Потом live поиск - стримим СРАЗУ после _search_live, минуя _process_results
+        # 2) Потом live поиск, если включен
         if use_live_search:
             try:
                 from tools.parsers.hh import HHParser
                 from tools.parsers.superjob import SuperJobParser
+                import asyncio
 
                 hh_parser = HHParser()
                 sj_parser = SuperJobParser()
-
                 queries_to_search = queries[:5]
 
                 print(f"[AI] Starting live search with {len(queries_to_search)} queries")
 
-                # Запускаем HH и SuperJob параллельно, но без Avito (он может зависать)
                 parallel_tasks = []
                 for query in queries_to_search:
                     single_filter = SearchFilters(
@@ -645,51 +695,48 @@ class JobSearchCrew:
                         salary_from=salary_from,
                         employment_type=employment_type,
                     )
-                    # HH
                     parallel_tasks.append(hh_parser.search(single_filter, limit=20))
-                    # SuperJob (может падать от SSL ошибок, но пробуем)
-                    try:
-                        parallel_tasks.append(sj_parser.search(single_filter, limit=20))
-                    except:
-                        pass  # SuperJob может не работать
+                    parallel_tasks.append(sj_parser.search(single_filter, limit=20))
 
                 print(f"[AI] Running {len(parallel_tasks)} parallel search tasks")
-
-                # Собираем результаты
-                import asyncio
                 results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
 
                 all_vacancies = []
                 for result in results:
                     if isinstance(result, list):
-                        all_vacancies.extend(result)
-                        print(f"[AI] Got {len(result)} vacancies from task")
+                        for vacancy in result:
+                            vid = self._vacancy_id(vacancy)
+                            if vid and vid not in emitted_ids:
+                                all_vacancies.append(vacancy)
+                                emitted_ids.add(vid)
                     elif isinstance(result, Exception):
                         print(f"[AI] Search task error: {result}")
 
                 print(f"[AI] Live search complete: {len(all_vacancies)} vacancies found")
 
                 if all_vacancies:
-                    # Отправляем чанки по 10 вакансий С ВАЛИДАЦИЕЙ
                     chunk_size = 10
                     for i in range(0, len(all_vacancies), chunk_size):
                         chunk = all_vacancies[i:i + chunk_size]
-                        # Валидируем чанк перед отправкой
                         validated_chunk = await self._validate_chunk(chunk, params)
-                        if validated_chunk:
-                            print(f"[AI] Live chunk {i//chunk_size + 1}: {len(chunk)} → {len(validated_chunk)} after validation")
-                            yield validated_chunk
+                        accepted_chunk, rejected_chunk = self._apply_lifestyle_preferences(
+                            validated_chunk,
+                            lifestyle_preferences,
+                        )
+                        if accepted_chunk or rejected_chunk:
+                            print(
+                                f"[AI] Live chunk {i//chunk_size + 1}: "
+                                f"{len(chunk)} -> {len(accepted_chunk)} accepted, {len(rejected_chunk)} rejected"
+                            )
+                            yield {"accepted": accepted_chunk, "rejected": rejected_chunk}
                         else:
                             print(f"[AI] Live chunk {i//chunk_size + 1}: all filtered out")
-
-                    print(f"[AI] Total {len(all_vacancies)} vacancies processed")
-                else:
-                    print(f"[AI] No vacancies found to stream")
-
             except Exception as e:
                 print(f"[AI] Live search error: {e}")
                 import traceback
                 traceback.print_exc()
+        else:
+            print("[AI] Live search skipped by request")
 
     async def _validate_chunk(self, chunk: list, params: dict) -> list:
         """
@@ -893,6 +940,100 @@ class JobSearchCrew:
             print(f"[AI] Validation error: {e}")
             # При ошибке - возвращаем все вакансии
             return vacancies
+
+    def _vacancy_id(self, vacancy: Any) -> str:
+        """Безопасно получить ID вакансии как строку."""
+        if isinstance(vacancy, dict):
+            return str(vacancy.get("id", "") or "")
+        return str(getattr(vacancy, "id", "") or "")
+
+    def _with_lifestyle_metadata(self, vacancy: Any, match: Any) -> Any:
+        """Attach lifestyle metadata to vacancy object/dict."""
+        payload = {
+            "fit_status": match.fit_status,
+            "fit_score": match.fit_score,
+            "fit_confidence": match.fit_confidence,
+            "matched_reasons": match.matched_reasons,
+            "mismatch_reasons": match.mismatch_reasons,
+        }
+
+        if hasattr(vacancy, "model_copy"):
+            return vacancy.model_copy(update=payload)
+
+        if isinstance(vacancy, dict):
+            updated = dict(vacancy)
+            updated.update(payload)
+            return updated
+
+        # Fallback for plain objects
+        for key, value in payload.items():
+            try:
+                setattr(vacancy, key, value)
+            except Exception:
+                pass
+        return vacancy
+
+    def _annotate_rejected_vacancy(self, vacancy: Any, reason: str) -> Any:
+        """Mark vacancy as rejected with a single reason."""
+        payload = {
+            "fit_status": "reject",
+            "fit_score": 0,
+            "fit_confidence": 0.7,
+            "matched_reasons": [],
+            "mismatch_reasons": [reason],
+        }
+
+        if hasattr(vacancy, "model_copy"):
+            return vacancy.model_copy(update=payload)
+
+        if isinstance(vacancy, dict):
+            updated = dict(vacancy)
+            updated.update(payload)
+            return updated
+
+        for key, value in payload.items():
+            try:
+                setattr(vacancy, key, value)
+            except Exception:
+                pass
+        return vacancy
+
+    def _apply_lifestyle_preferences(
+        self,
+        vacancies: list,
+        lifestyle_preferences: Optional[dict],
+    ) -> tuple[list, list]:
+        """
+        Apply lifestyle filters and split vacancies into accepted/rejected.
+        """
+        if not vacancies:
+            return [], []
+
+        if not lifestyle_matcher.has_active_preferences(lifestyle_preferences):
+            return vacancies, []
+
+        strict_mode = bool((lifestyle_preferences or {}).get("strict_mode", False))
+        accepted: list = []
+        rejected: list = []
+
+        for vacancy in vacancies:
+            match = lifestyle_matcher.evaluate(vacancy, lifestyle_preferences)
+            vacancy_with_meta = self._with_lifestyle_metadata(vacancy, match)
+
+            if strict_mode:
+                # Strict mode: keep only explicit full matches
+                if match.fit_status == "fit":
+                    accepted.append(vacancy_with_meta)
+                else:
+                    rejected.append(vacancy_with_meta)
+            else:
+                # Soft mode: reject only clear mismatch
+                if match.fit_status == "reject":
+                    rejected.append(vacancy_with_meta)
+                else:
+                    accepted.append(vacancy_with_meta)
+
+        return accepted, rejected
 
     def _normalize_text(self, text: str) -> str:
         """Нормализация текста для сравнений."""
@@ -1271,6 +1412,9 @@ class JobSearchCrew:
         message: str,
         conversation_history: list[dict] = None,
         use_live_search: bool = True,
+        use_feed_search: bool = True,
+        exclude_vacancy_ids: Optional[list[str]] = None,
+        lifestyle_preferences: Optional[dict] = None,
     ) -> AsyncIterator[dict]:
         """
         Streaming обработка сообщения.
@@ -1332,14 +1476,34 @@ class JobSearchCrew:
 
         # Streaming поиск
         all_vacancies = []
+        all_rejected_vacancies = []
         chunk_count = 0
-        async for vacancy_chunk in self._execute_search_stream(strategy, use_live_search, params):
-            all_vacancies.extend(vacancy_chunk)
+        async for batch in self._execute_search_stream(
+            strategy,
+            use_live_search=use_live_search,
+            params=params,
+            use_feed_search=use_feed_search,
+            exclude_vacancy_ids=exclude_vacancy_ids,
+            lifestyle_preferences=lifestyle_preferences,
+        ):
+            accepted_chunk = batch.get("accepted", [])
+            rejected_chunk = batch.get("rejected", [])
+            all_vacancies.extend(accepted_chunk)
+            all_rejected_vacancies.extend(rejected_chunk)
             chunk_count += 1
-            print(f"[AI] Sending chunk {chunk_count} with {len(vacancy_chunk)} vacancies")
-            yield {'type': 'vacancies_chunk', 'content': vacancy_chunk}
+            print(
+                f"[AI] Sending chunk {chunk_count}: "
+                f"{len(accepted_chunk)} accepted, {len(rejected_chunk)} rejected"
+            )
+            if accepted_chunk:
+                yield {'type': 'vacancies_chunk', 'content': accepted_chunk}
+            if rejected_chunk:
+                yield {'type': 'rejected_vacancies', 'content': rejected_chunk}
 
-        print(f"[AI] Total chunks sent: {chunk_count}, total vacancies: {len(all_vacancies)}")
+        print(
+            f"[AI] Total chunks sent: {chunk_count}, total vacancies: {len(all_vacancies)}, "
+            f"rejected: {len(all_rejected_vacancies)}"
+        )
 
         strict_company = bool(params.get("strict_company") and params.get("company"))
         if strict_company and not all_vacancies:
@@ -1382,6 +1546,9 @@ async def process_chat_message(
     chat_id: str = None,
     user_data: dict = None,
     use_live_search: bool = True,
+    use_feed_search: bool = True,
+    exclude_vacancy_ids: Optional[list[str]] = None,
+    lifestyle_preferences: Optional[dict] = None,
 ) -> CrewResult:
     """
     Удобная функция для обработки сообщения.
@@ -1392,6 +1559,9 @@ async def process_chat_message(
         message=message,
         conversation_history=session.get_recent_history(),
         use_live_search=use_live_search,
+        use_feed_search=use_feed_search,
+        exclude_vacancy_ids=exclude_vacancy_ids,
+        lifestyle_preferences=lifestyle_preferences,
     )
     session.add_message("user", message)
     session.add_message("assistant", result.response_text)

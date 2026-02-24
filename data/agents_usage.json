@@ -1,0 +1,28 @@
+{
+  "2026-02-22": {
+    "crew_analyst": {
+      "calls": 1,
+      "input_tokens": 942,
+      "output_tokens": 951,
+      "models_used": {
+        "google/gemini-3-pro-preview": {
+          "input_tokens": 942,
+          "output_tokens": 951,
+          "calls": 1
+        }
+      }
+    },
+    "crew_composer": {
+      "calls": 1,
+      "input_tokens": 316,
+      "output_tokens": 496,
+      "models_used": {
+        "google/gemini-3-pro-preview": {
+          "input_tokens": 316,
+          "output_tokens": 496,
+          "calls": 1
+        }
+      }
+    }
+  }
+}
