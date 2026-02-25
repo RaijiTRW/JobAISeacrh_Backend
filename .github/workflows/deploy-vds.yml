@@ -20,25 +20,57 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Deploy backend repo snapshot to VDS via rsync
-        uses: burnett01/rsync-deployments@6.0.0
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          switches: >-
-            -avzr --delete
-            --exclude='.env'
-            --exclude='.env.example'
-            --exclude='__pycache__/'
-            --exclude='*.pyc'
-            --exclude='.git/'
-            --exclude='logs/'
-            --exclude='venv/'
-            --exclude='.DS_Store'
-            --exclude='._*'
-          path: ./
-          remote_path: /var/www/jobaisearch/repo/backend/JobAISeacrh_Backend/
-          remote_host: ${{ secrets.VDS_HOST }}
-          remote_user: ${{ secrets.VDS_USERNAME }}
-          remote_key: ${{ secrets.VDS_SSH_KEY }}
+          ssh-private-key: ${{ secrets.VDS_SSH_KEY }}
+
+      - name: Deploy backend repo snapshot to VDS via rsync (with retry)
+        env:
+          VDS_HOST: ${{ secrets.VDS_HOST }}
+          VDS_USERNAME: ${{ secrets.VDS_USERNAME }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          RSYNC_RSH="ssh -p 22 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -o ConnectTimeout=20"
+
+          attempt=1
+          max_attempts=5
+          while true; do
+            echo "rsync attempt ${attempt}/${max_attempts}"
+            set +e
+            rsync -avzr --delete \
+              --exclude='.env' \
+              --exclude='.env.example' \
+              --exclude='__pycache__/' \
+              --exclude='*.pyc' \
+              --exclude='.git/' \
+              --exclude='logs/' \
+              --exclude='venv/' \
+              --exclude='.DS_Store' \
+              --exclude='._*' \
+              -e "$RSYNC_RSH" \
+              ./ "${VDS_USERNAME}@${VDS_HOST}:/var/www/jobaisearch/repo/backend/JobAISeacrh_Backend/"
+            rc=$?
+            set -e
+
+            if [ "$rc" -eq 0 ]; then
+              break
+            fi
+
+            if [ "$rc" -ne 255 ] || [ "$attempt" -ge "$max_attempts" ]; then
+              echo "rsync failed with exit code $rc"
+              exit "$rc"
+            fi
+
+            sleep_seconds=$((attempt * 10))
+            echo "rsync SSH connection dropped (code 255), retrying in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+            attempt=$((attempt + 1))
+          done
 
       - name: Zero-downtime deploy on VDS
         uses: appleboy/ssh-action@v1.2.0
