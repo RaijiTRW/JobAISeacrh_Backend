@@ -156,6 +156,9 @@ async def send_message_stream(request: ChatMessageRequest):
     user_data = await user_profile_service.get_user_data(request.user_id)
     user_data_dict = user_data.model_dump(mode='json') if user_data else {}
 
+    # Берём историю ДО добавления текущего сообщения, чтобы не дублировать его
+    # (иначе короткие фразы вроде "найди еще" получают слишком большой вес в анализе).
+    history_for_context = session.get_recent_history(limit=10)
     session.add_message("user", request.message)
 
     async def generate():
@@ -177,7 +180,7 @@ async def send_message_stream(request: ChatMessageRequest):
 
             async for event in crew.process_message_stream(
                 message=request.message,
-                conversation_history=session.get_recent_history(limit=10),
+                conversation_history=history_for_context,
                 use_live_search=use_live_search,
                 use_feed_search=use_feed_search,
                 exclude_vacancy_ids=request.exclude_vacancy_ids,
